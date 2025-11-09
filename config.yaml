@@ -1,0 +1,83 @@
+# 数据集处理配置
+
+# --- 核心路径配置 ---
+# 输入目录：包含 .wav 和 .lab 文件的原始数据集文件夹
+root_dir: 'D:\Justin\编程\Python作品\AudioPreProcess\input\胡桃'
+# 是否递归处理输入目录下的所有子文件夹
+# true: 处理所有子文件夹
+# false: 仅处理根目录下的文件
+recursive: true
+
+# --- 文件处理配置 ---
+# 是否使用 .lab 文件的内容作为最终输出的音频文件名
+# true: 使用标注文本命名 (例如 "你好世界.wav")
+# false: 保留原始文件名或生成新格式 (例如 "角色名_merge_1.wav")
+use_lab_text_as_filename: false
+
+# --- 音频处理配置 ---
+# 切分与合并的配置
+split_and_merge:
+  short_threshold: 2.0  # 小于等于此值为短音频 (会被合并)
+  long_threshold: 15.0  # 大于等于此值为长音频 (会被切分)
+  merge_silence_duration: 0.3 # 合并短音频时，在片段之间插入的静音时长 (秒)
+  output_to_split_folder: false # true: 将切分文件输出到 "切分后" 子文件夹; false: 和其他文件一起输出
+
+# --- 长音频切分配置 ---
+split:
+  # --- 模型与设备 ---
+  device: "auto"              # "cuda", "cpu", "auto"
+  language: "zh"              # whisperx 使用的语言代码
+
+  # --- 切分策略 ---
+  max_duration: 15.0            # 切分后单段最大时长
+  min_duration: 2.0             # 切分后单段最小时长
+  max_segments: 5               # 单个长音频最多切成几段 (作为无法找到最优切分方案时的备用策略)
+
+  # --- 静音检测与切分点 ---
+  split_silence_top_db: 40      # 定义“静音”的响度阈值 (值越大, 越不容易被识别为静音)
+  split_min_silence_len_ms: 500 # 最小静音时长 (毫秒), 用于过滤字间停顿
+  split_offset_from_silence_end_ms: 0 # 在静音区段末尾的偏移量 (毫秒), 负数表示提前
+
+
+# --- ASR (自动语音识别) 相关配置 ---
+asr:
+  language: "zh" # language 参数对 funasr 无直接作用，但可保留
+  # FunASR 参数
+  funasr:
+    model: "paraformer-zh"
+    use_vad: false # 控制是否使用VAD (语音活动检测)。如果某些音频无法识别，可尝试设为 false
+  whisperx:
+    model: "large-v2"
+    batch_size: 16
+
+# --- 文本处理配置 ---
+text:
+  # 繁体转简体
+  t2s: true
+  # 文本替换规则
+  replace_map:
+    "|": ""
+    "\n": " "
+    "\r": ""
+    "「": ""
+    "」": ""
+    " / ": "，"
+    "（": ""
+    "）": ""
+    "(": ""
+    ")": ""
+    "#": ""
+    "{M#他}{F#她}": "他"
+    "{M#他们}{F#她们}": "他们"
+    "{M他}{F她}": "他"
+    "{M他们}{F她们}": "他们"
+    "{PLAYERAVATARSEXPRO[INFO_MALE_PRONOUN_HEINFO_FEMALE_PRONOUN_SHE]}": "他"
+    
+    # --- 特殊规则 ---
+    # {ASR}: 将占位符替换为语音识别结果（未完成）
+    # 例如，如果 lab 包含 "你好，{PLAYER_NAME}"，并且此规则存在，
+    # 程序会识别整个音频，并尝试用识别出的内容替换 {PLAYER_NAME}。
+    
+    # {SKIP}: 跳过包含此占位符的音频
+    # 例如，如果 lab 包含 "BGM-{NICKNAME}"，此音频文件将被完全跳过。
+    "{NICKNAME}": "{SKIP}"

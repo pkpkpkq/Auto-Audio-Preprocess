@@ -1,0 +1,6 @@
+torch
+librosa
+numpy
+whisperx
+opencc-python-reimplemented
+PyYAML
