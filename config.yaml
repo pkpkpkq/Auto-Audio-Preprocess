@@ -2,7 +2,7 @@
 
 # --- 核心路径配置 ---
 # 输入目录：包含 .wav 和 .lab 文件的原始数据集文件夹
-root_dir: 'D:\Justin\编程\Python作品\AudioPreProcess\input\胡桃'
+root_dir: ''
 # 是否递归处理输入目录下的所有子文件夹
 # true: 处理所有子文件夹
 # false: 仅处理根目录下的文件
