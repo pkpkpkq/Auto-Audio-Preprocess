@@ -4,3 +4,4 @@ numpy
 whisperx
 opencc-python-reimplemented
 PyYAML
+transformers

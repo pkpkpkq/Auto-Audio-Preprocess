@@ -4,11 +4,13 @@ import logging
 import sys
 import difflib
 import re
+from collections import defaultdict
 
 # Local module imports
 from asr import transcribe_audio
 from audio_splitter import split_batch
 import audio_utils as au
+from ser import SpeechEmotionRecognizer
 
 class DatasetProcessor:
     """封装整个数据集处理流程的类"""
@@ -36,6 +38,12 @@ class DatasetProcessor:
         self.t2s_enabled = text_config.get('t2s', True)
 
         self.asr_config = self.config.get('asr', {})
+        
+        self.ser_config = self.config.get('ser', {})
+        self.ser_enabled = self.ser_config.get('enable', False)
+        self.ser_recognizer = None
+        if self.ser_enabled:
+            self.ser_recognizer = SpeechEmotionRecognizer(self.ser_config)
 
         self.folder_name = os.path.basename(self.root_dir.rstrip(os.sep))
         if not self.folder_name:
@@ -49,7 +57,7 @@ class DatasetProcessor:
         self.auto_merge_dir = None
         self.auto_split_dir = None
         self.log_path = None
-        self.out_list_path = None
+        # self.out_list_path = None # 将被替换为按情感分类的列表
         self.logger = None
 
     def _extract_asr_for_placeholder(self, asr_segments, prefix, suffix):
@@ -210,7 +218,7 @@ class DatasetProcessor:
         self.auto_split_dir = self.temp_dir
 
         self.log_path = os.path.join(self.base_output_dir, f"{self.folder_name}.log")
-        self.out_list_path = os.path.join(self.base_output_dir, f"{self.folder_name}.list")
+        # self.out_list_path is now handled dynamically based on emotion
         # 将去重记录移动到角色文件夹下
         self.dedup_log_path = os.path.join(self.output_dir, "！去重记录.txt")
 
@@ -230,8 +238,8 @@ class DatasetProcessor:
         self.logger.info(f"  - 输入目录: {self.root_dir}")
         self.logger.info(f"  - 输出目录: {self.output_dir}")
         self.logger.info(f"  - 切分文件输出到 '切分后' 文件夹: {self.output_to_split_folder}")
-        self.logger.info(f"  - 输出列表文件: {self.out_list_path}")
         self.logger.info(f"  - 使用标注文本命名: {self.use_lab_text_as_filename}")
+        self.logger.info(f"  - 情感识别 (SER) 已 {'启用' if self.ser_enabled else '禁用'}")
         self.logger.info(f"  - 替换规则: {self.replace_map}")
         self.logger.info("="*50)
 
@@ -320,9 +328,14 @@ class DatasetProcessor:
                 self.logger.warning(f"获取 {wav_path} 的时长失败: {e}")
                 continue
 
+            emotion = "neutral" # Default emotion
+            if self.ser_enabled:
+                self.logger.info(f"Running SER for {os.path.basename(wav_path)}")
+                emotion = self.ser_recognizer.predict_emotion(wav_path)
+
             matched.append({
                 "stem": stem_key, "wav_path": wav_path, "lab_path": lab_path,
-                "lab_text": lab_text, "duration": duration
+                "lab_text": lab_text, "duration": duration, "emotion": emotion
             })
 
         if read_failures:
@@ -350,71 +363,145 @@ class DatasetProcessor:
         return matched
 
     def _process_short_files(self, short_list):
-        """处理短音频，进行自动合并。"""
+        """处理短音频，按情感分组后进行自动合并，并根据新规则处理剩余的孤立文件。"""
         if not short_list:
             return [], []
 
-        s = short_list[:]
-        groups = []
-        n = len(s)
-        if n <= 3:
-            groups = [s]
-        else:
-            r = n % 3
-            main_count = n - (4 if r == 1 else r)
-            idx = 0
-            while idx < main_count:
-                groups.append([s[idx], s[idx+1], s[idx+2]])
-                idx += 3
-            tail = s[main_count:]
-            if r == 1:
-                groups.append([tail[0], tail[1]])
-                groups.append([tail[2], tail[3]])
-            elif r == 2:
-                groups.append([tail[0], tail[1]])
-
-        if groups:
-            print(f"[INFO] 准备将 {len(short_list)} 个短音频文件合并成 {len(groups)} 组。")
+        # 1. 按情感对短音频进行分组
+        emotion_groups = defaultdict(list)
+        for item in short_list:
+            emotion_groups[item['emotion']].append(item)
+        
+        self.logger.info(f"短音频按情感分组: { {e: len(v) for e, v in emotion_groups.items()} }")
+        print(f"[INFO] Short audios grouped by emotion: { {e: len(v) for e, v in emotion_groups.items()} }")
 
         processed_entries = []
         merge_map_lines = []
-        merge_read_failures, merge_failures = 0, 0
+        leftover_items = []
 
-        for group_idx, group in enumerate(groups, start=1):
-            wav_infos, ok = [], True
-            for item in group:
-                try:
-                    params, frames = au.read_wav_params_and_frames(item["wav_path"])
-                    wav_infos.append({"params": params, "frames": frames, "path": item["wav_path"], "lab_text": item["lab_text"], "duration": item["duration"]})
-                except Exception as e:
-                    self.logger.warning(f"读取用于合并的 wav 文件失败 {item['wav_path']}: {e}")
-                    merge_read_failures += 1
-                    ok = False
-                    break
+        # 2. 分离可合并的组和剩余的组
+        for emotion, items in emotion_groups.items():
+            if len(items) > 1:
+                # 这些组足够大，可以进行标准合并
+                self.logger.info(f"Emotion group '{emotion}' has {len(items)} items and will be merged.")
+                
+                s = items[:]
+                groups = []
+                n = len(s)
+                if n in [2, 3]:
+                    groups = [s]
+                elif n > 3:
+                    r = n % 3
+                    main_count = n - (4 if r == 1 else r)
+                    idx = 0
+                    while idx < main_count:
+                        groups.append(s[idx:idx+3])
+                        idx += 3
+                    tail = s[main_count:]
+                    if r == 1:
+                        groups.append(tail[0:2])
+                        groups.append(tail[2:4])
+                    elif r == 2:
+                        groups.append(tail)
+
+                for group_idx, group in enumerate(groups, start=1):
+                    wav_infos = []
+                    for item in group:
+                        try:
+                            params, _ = au.read_wav_params_and_frames(item["wav_path"])
+                            wav_infos.append({"params": params, "path": item["wav_path"], "lab_text": item["lab_text"], "duration": item["duration"], "emotion": item["emotion"]})
+                        except Exception as e:
+                            self.logger.warning(f"Reading wav for merge failed {item['wav_path']}: {e}")
+                            processed_entries.append(item)
+                    
+                    merged_duration = sum(i['duration'] for i in wav_infos)
+                    merge_name = f"{self.folder_name}_{emotion}_merge_{group_idx}_{au.format_hms_filename(merged_duration)}.wav"
+                    merge_path = os.path.join(self.auto_merge_dir, merge_name)
+
+                    try:
+                        au.merge_wavs(merge_path, wav_infos, self.config)
+                        merge_lab = "".join(i["lab_text"] for i in wav_infos)
+                        processed_entries.append({"wav_abs": os.path.abspath(merge_path), "lab_text": merge_lab, "duration": merged_duration, "emotion": emotion})
+                        
+                        source_files_str = ", ".join([f"{os.path.basename(i['path'])} ({i['emotion']})" for i in wav_infos])
+                        merge_map_lines.append(f"{os.path.basename(merge_path)} ({emotion}) <- [{source_files_str}]")
+                    except Exception as e:
+                        self.logger.error(f"Merging group {group_idx} for emotion '{emotion}' failed: {e}")
+                        processed_entries.extend(group)
+
+            elif len(items) == 1:
+                item = items[0]
+                warning_msg = f"无法找到与 {os.path.basename(item['wav_path'])} ({item['emotion']}) 具有相同情感的音频进行合并，已暂存等待跨情感合并。"
+                self.logger.warning(warning_msg)
+                merge_map_lines.append(f"[警告] {warning_msg}")
+                leftover_items.append(item)
+
+        # 3. 合并所有剩余的孤立文件
+        if len(leftover_items) > 1:
+            self.logger.warning(f"正在合并 {len(leftover_items)} 个来自不同情感类别的孤立音频。")
+            print(f"[WARN] Merging {len(leftover_items)} leftover audios from different emotion groups.")
             
-            if not ok:
-                merge_failures += 1
-                processed_entries.extend([{"wav_abs": os.path.abspath(item["wav_path"]), "lab_text": item["lab_text"], "duration": item["duration"]}
-                                          for item in group])
-                continue
+            s = leftover_items[:]
+            groups = []
+            n = len(s)
+            if n in [2, 3]:
+                groups = [s]
+            elif n > 3:
+                r = n % 3
+                main_count = n - (4 if r == 1 else r)
+                idx = 0
+                while idx < main_count:
+                    groups.append(s[idx:idx+3])
+                    idx += 3
+                tail = s[main_count:]
+                if r == 1:
+                    groups.append(tail[0:2])
+                    groups.append(tail[2:4])
+                elif r == 2:
+                    groups.append(tail)
 
-            merge_name = f"{self.folder_name}_merge_{group_idx}_{au.format_hms_filename(sum(i['duration'] for i in wav_infos))}.wav"
-            merge_path = os.path.join(self.auto_merge_dir, merge_name)
-            try:
-                au.merge_wavs(merge_path, wav_infos, self.config)
-                merge_lab = "".join(i["lab_text"] for i in wav_infos)
-                processed_entries.append({"wav_abs": os.path.abspath(merge_path), "lab_text": merge_lab, "duration": sum(i["duration"] for i in wav_infos)})
-                merge_map_lines.append(f"{merge_path} <- " + ", ".join(i["path"] for i in wav_infos))
-            except Exception as e:
-                merge_failures += 1
-                self.logger.warning(f"第 {group_idx} 组合并失败: {e}")
-                processed_entries.extend([{"wav_abs": os.path.abspath(item["wav_path"]), "lab_text": item["lab_text"], "duration": item["duration"]}
-                                          for item in group])
+            for group_idx, group in enumerate(groups, start=1):
+                wav_infos = []
+                for item in group:
+                    try:
+                        params, _ = au.read_wav_params_and_frames(item["wav_path"])
+                        wav_infos.append({"params": params, "path": item["wav_path"], "lab_text": item["lab_text"], "duration": item["duration"], "emotion": item["emotion"]})
+                    except Exception as e:
+                        self.logger.warning(f"Reading leftover wav for merge failed {item['wav_path']}: {e}")
+                        processed_entries.append(item)
 
-        if merge_read_failures > 0:
-            print(f"[WARN] {merge_read_failures} 个短音频文件读取失败，无法合并。", file=sys.stderr)
-        if merge_failures > 0:
-            print(f"[WARN] {merge_failures} 组短音频文件合并失败。", file=sys.stderr)
+                if not wav_infos: continue
+
+                merged_duration = sum(i['duration'] for i in wav_infos)
+                # 新规则：合并后的情感 = 第一个音频的情感
+                result_emotion = wav_infos[0]['emotion']
+                
+                merge_name = f"{self.folder_name}_cross-emotion_merge_{group_idx}_{au.format_hms_filename(merged_duration)}.wav"
+                merge_path = os.path.join(self.auto_merge_dir, merge_name)
+
+                try:
+                    au.merge_wavs(merge_path, wav_infos, self.config)
+                    merge_lab = "".join(i["lab_text"] for i in wav_infos)
+                    processed_entries.append({"wav_abs": os.path.abspath(merge_path), "lab_text": merge_lab, "duration": merged_duration, "emotion": result_emotion})
+                    
+                    source_files_str = ", ".join([f"{os.path.basename(i['path'])} ({i['emotion']})" for i in wav_infos])
+                    log_msg = f"{os.path.basename(merge_path)} ({result_emotion}) <- [{source_files_str}] (跨情感合并，选用第一个音频的情感)"
+                    merge_map_lines.append(log_msg)
+                    self.logger.info(log_msg)
+
+                except Exception as e:
+                    self.logger.error(f"Merging leftover group {group_idx} failed: {e}")
+                    processed_entries.extend(group)
+        
+        elif len(leftover_items) == 1:
+            # 如果最后只剩一个，无法合并，直接加入最终列表，并修正key
+            item = leftover_items[0]
+            processed_entries.append({
+                "wav_abs": os.path.abspath(item["wav_path"]),
+                "lab_text": item["lab_text"],
+                "duration": item["duration"],
+                "emotion": item["emotion"]
+            })
 
         return processed_entries, merge_map_lines
 
@@ -434,13 +521,14 @@ class DatasetProcessor:
             batch_results = split_batch(pairs, self.auto_split_dir, self.config, logger_arg=self.logger)
         except Exception as e:
             self.logger.error(f"批量切分函数'split_batch'执行失败: {e}")
-            unsplit_entries.extend([{"wav_abs": os.path.abspath(item["wav_path"]), "lab_text": item["lab_text"], "duration": item["duration"]}
-                                      for item in long_list])
+            # 如果批量切分失败，所有长音频都作为未切分处理，并保留其情感
+            unsplit_entries.extend(long_list)
             return unsplit_entries, split_entries
 
         split_failures = []
         for m in long_list:
             wavp = m["wav_path"]
+            original_emotion = m["emotion"] # 获取原始情感
             res = batch_results.get(wavp, {"paths": None, "error": "no result"})
             split_wav_paths = res.get("paths")
             
@@ -452,18 +540,25 @@ class DatasetProcessor:
                         lab_text = au.read_lab(split_lab_path).strip()
                         duration = au.get_wav_duration_seconds(split_wav_path)
                         
-                        # 为切分文件添加一个标记
+                        # 切分后的文件继承原始情感
                         split_entries.append({
                             "wav_abs": os.path.abspath(split_wav_path),
                             "lab_text": lab_text,
                             "duration": duration,
-                            "is_split": True 
+                            "is_split": True,
+                            "emotion": original_emotion 
                         })
                     except Exception as e:
                         self.logger.error(f"处理切分后的文件 {split_wav_path} 失败: {e}")
             else:
                 split_failures.append(os.path.basename(wavp))
-                unsplit_entries.append({"wav_abs": os.path.abspath(wavp), "lab_text": m["lab_text"], "duration": m["duration"]})
+                # 切分失败的文件保留其原始信息，但要确保 key 是 'wav_abs'
+                unsplit_entries.append({
+                    "wav_abs": os.path.abspath(m["wav_path"]),
+                    "lab_text": m["lab_text"],
+                    "duration": m["duration"],
+                    "emotion": original_emotion
+                })
         
         if split_failures:
             print(f"[WARN] {len(split_failures)} 个长音频文件自动切分失败。", file=sys.stderr)
@@ -473,83 +568,118 @@ class DatasetProcessor:
     def _finalize_output(self, final_entries, merge_map_lines, initial_count):
         """最终确定输出文件：重命名、复制并写入所有摘要和列表文件。"""
         self.logger.info(f"开始最后的文件整理与输出，共 {len(final_entries)} 个最终音频。")
-        final_output_entries = []
-        processed_filenames = set()
-        merge_counter = 1
-        split_counter = 1
+        
+        final_output_entries_by_emotion = defaultdict(list)
+        processed_filenames_by_emotion = defaultdict(set)
 
         for entry in final_entries:
             source_path = entry["wav_abs"]
             lab_text = entry["lab_text"]
             is_split = entry.get("is_split", False)
+            emotion = entry.get("emotion", "neutral")
 
-            # 根据文件类型确定输出目录
-            if is_split and self.output_to_split_folder:
-                target_dir = self.split_output_dir
+            # 根据文件类型和情感确定输出目录
+            if self.ser_enabled:
+                target_dir = os.path.join(self.output_dir, emotion)
             else:
                 target_dir = self.output_dir
+
+            if is_split and self.output_to_split_folder:
+                # 如果启用了SER，切分文件夹也应该在情感目录下
+                target_dir = os.path.join(target_dir, "切分后")
+
+            os.makedirs(target_dir, exist_ok=True)
 
             if self.use_lab_text_as_filename:
                 target_basename = au.sanitize_filename(lab_text) + ".wav"
             else:
                 source_filename = os.path.basename(source_path)
-                # 对于切分文件，保留切分器生成的更具描述性的文件名 (e.g., original_name_part1.wav)
                 if is_split:
                     target_basename = source_filename
-                # 对于合并文件，使用更简洁的 `_merged_` 格式
                 elif source_path.startswith(os.path.abspath(self.auto_merge_dir)):
-                    target_basename = f"{self.folder_name}_merged_{merge_counter}.wav"
-                    merge_counter += 1
-                # 对于其他所有文件（时长正常的，或处理失败的），保留原始文件名
+                    # 使用更具描述性的合并文件名
+                    target_basename = source_filename
                 else:
                     target_basename = source_filename
 
+            # 确保在各自的情感目录中文件名唯一
             temp_basename, counter = target_basename, 1
-            while temp_basename in processed_filenames:
+            while temp_basename in processed_filenames_by_emotion[emotion]:
                 base, ext = os.path.splitext(target_basename)
                 temp_basename = f"{base}_{counter}{ext}"
                 counter += 1
             target_basename = temp_basename
-            processed_filenames.add(target_basename)
+            processed_filenames_by_emotion[emotion].add(target_basename)
 
             target_path = os.path.join(target_dir, target_basename)
             try:
-                # 临时文件（合并、切分）总是移动，原始文件（正常、未成功处理的长音频）则复制
                 if source_path.startswith(os.path.abspath(self.temp_dir)):
                     shutil.move(source_path, target_path)
                 else:
                     shutil.copy(source_path, target_path)
                 
-                final_output_entries.append({"wav_abs": os.path.abspath(target_path), "lab_text": lab_text, "duration": entry["duration"]})
+                entry_copy = entry.copy()
+                entry_copy["wav_abs"] = os.path.abspath(target_path)
+                final_output_entries_by_emotion[emotion].append(entry_copy)
+
             except Exception as e:
                 self.logger.error(f"复制或移动 {source_path} 到 {target_path} 失败: {e}")
 
         if merge_map_lines:
-            # 将合并记录移动到角色文件夹下
             with open(os.path.join(self.output_dir, "！合并记录.txt"), "a", encoding="utf-8") as mf:
                 mf.write("\n".join(merge_map_lines) + "\n")
 
         split_log_path = os.path.join(self.temp_dir, "切分记录.txt")
         if os.path.exists(split_log_path):
-            # 将切分记录移动到角色文件夹下
             target_log_path = os.path.join(self.output_dir, "！切分记录.txt")
             shutil.move(split_log_path, target_log_path)
 
-        total_duration_seconds = sum(e['duration'] for e in final_output_entries)
-        summary_text = f"最终音频总时长: {au.format_hms(total_duration_seconds)}"
-        print(summary_text)
-        self.logger.info(summary_text)
+        total_duration_seconds = 0
+        self.logger.info("--- 最终结果统计 ---")
+        print("\n--- Final Results ---")
 
-        # 创建空的音频总长度文件
-        duration_filename = f"！{au.format_hms_filename(total_duration_seconds)}.txt"
-        duration_filepath = os.path.join(self.output_dir, duration_filename)
-        with open(duration_filepath, "w") as f:
-            pass # 创建空文件
-        self.logger.info(f"已创建空的音频总时长文件: {duration_filepath}")
+        # 如果SER禁用，但仍有条目，则它们都将被视为 "neutral"
+        if not self.ser_enabled and any(final_output_entries_by_emotion.values()):
+             if "neutral" not in final_output_entries_by_emotion:
+                 # This can happen if all files were processed without SER and ended up in other categories
+                 # For summary purposes, we can lump them under neutral.
+                 all_entries = []
+                 for emotion_group in final_output_entries_by_emotion.values():
+                     all_entries.extend(emotion_group)
+                 final_output_entries_by_emotion.clear()
+                 final_output_entries_by_emotion["neutral"] = all_entries
 
-        with open(self.out_list_path, "w", encoding="utf-8") as ol:
-            for ent in final_output_entries:
-                ol.write(f"{ent['wav_abs']}|{self.folder_name}|ZH|{ent['lab_text']}\n")
+        for emotion, entries in final_output_entries_by_emotion.items():
+            emotion_duration = sum(e['duration'] for e in entries)
+            total_duration_seconds += emotion_duration
+            summary_text = f"情感 '{emotion}': {len(entries)} 个文件, 总时长: {au.format_hms(emotion_duration)}"
+            print(summary_text)
+            self.logger.info(summary_text)
+
+            # 为每个情感创建独立的时长文件
+            formatted_duration = au.format_hms_filename(emotion_duration)
+            duration_filename = f"！{formatted_duration}_{emotion}.txt"
+            duration_filepath = os.path.join(self.output_dir, duration_filename)
+            with open(duration_filepath, "w", encoding="utf-8") as f:
+                pass
+            self.logger.info(f"已创建情感时长文件: {duration_filepath}")
+
+            # 为每个情感生成独立的 .list 文件
+            if self.ser_enabled:
+                list_path = os.path.join(self.base_output_dir, f"{self.folder_name}_{emotion}.list")
+            else:
+                # 如果SER禁用，则使用旧的单一文件格式
+                list_path = os.path.join(self.base_output_dir, f"{self.folder_name}.list")
+
+            with open(list_path, "w", encoding="utf-8") as ol:
+                for ent in entries:
+                    ol.write(f"{ent['wav_abs']}|{self.folder_name}|ZH|{ent['lab_text']}\n")
+            self.logger.info(f"已生成列表文件: {list_path}")
+            print(f"Generated list file: {list_path}")
+
+        overall_summary = f"最终音频总时长: {au.format_hms(total_duration_seconds)}"
+        print(overall_summary)
+        self.logger.info(overall_summary)
 
     def run(self):
         """执行完整的数据集处理流程。"""
@@ -565,13 +695,28 @@ class DatasetProcessor:
         long_list = [m for m in all_entries if m["duration"] >= long_threshold]
         
         final_entries_before_copy = []
-        # 添加正常时长的文件
-        final_entries_before_copy.extend([{"wav_abs": os.path.abspath(m["wav_path"]), "lab_text": m["lab_text"], "duration": m["duration"]}
-                                          for m in normal_list])
+        # 添加正常时长的文件, 并确保 key 为 'wav_abs'
+        final_entries_before_copy.extend([
+            {
+                "wav_abs": os.path.abspath(m["wav_path"]),
+                "lab_text": m["lab_text"],
+                "duration": m["duration"],
+                "emotion": m["emotion"]
+            } for m in normal_list
+        ])
         
         # 处理长音频，同时接收未切分成功和已切分成功的文件
         unsplit_long_entries, split_entries = self._process_long_files(long_list)
-        final_entries_before_copy.extend(unsplit_long_entries)
+        
+        # 对未切分成功的长音频，同样确保 key 为 'wav_abs'
+        for m in unsplit_long_entries:
+            final_entries_before_copy.append({
+                "wav_abs": os.path.abspath(m["wav_path"]),
+                "lab_text": m["lab_text"],
+                "duration": m["duration"],
+                "emotion": m["emotion"]
+            })
+
         final_entries_before_copy.extend(split_entries)
         
         # 处理短音频

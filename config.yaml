@@ -16,9 +16,11 @@ use_lab_text_as_filename: false
 
 # --- 音频处理配置 ---
 # 切分与合并的配置
+# gpt-sovits 3-25s 
+# so-vits-svc 2-15s
 split_and_merge:
-  short_threshold: 2.0  # 小于等于此值为短音频 (会被合并)
-  long_threshold: 15.0  # 大于等于此值为长音频 (会被切分)
+  short_threshold: 3.0  # 小于等于此值为短音频 (会被合并)
+  long_threshold: 25.0  # 大于等于此值为长音频 (会被切分)
   merge_silence_duration: 0.3 # 合并短音频时，在片段之间插入的静音时长 (秒)
   output_to_split_folder: false # true: 将切分文件输出到 "切分后" 子文件夹; false: 和其他文件一起输出
 
@@ -29,15 +31,20 @@ split:
   language: "zh"              # whisperx 使用的语言代码
 
   # --- 切分策略 ---
-  max_duration: 15.0            # 切分后单段最大时长
-  min_duration: 2.0             # 切分后单段最小时长
-  max_segments: 5               # 单个长音频最多切成几段 (作为无法找到最优切分方案时的备用策略)
+  min_duration: 3.0             # 切分后单段最小时长
+  max_duration: 25.0            # 切分后单段最大时长
+  max_segments: 5               # 单个长音频最多切成几段
 
   # --- 静音检测与切分点 ---
   split_silence_top_db: 40      # 定义“静音”的响度阈值 (值越大, 越不容易被识别为静音)
   split_min_silence_len_ms: 500 # 最小静音时长 (毫秒), 用于过滤字间停顿
   split_offset_from_silence_end_ms: 0 # 在静音区段末尾的偏移量 (毫秒), 负数表示提前
 
+# --- SER (语音情感识别) 配置 ---
+ser:
+  enable: false # 设置为 true 以启用情感识别
+  model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
+  device: "auto" # "cuda", "cpu", "auto"
 
 # --- ASR (自动语音识别) 相关配置 ---
 asr:
@@ -81,3 +88,4 @@ text:
     # {SKIP}: 跳过包含此占位符的音频
     # 例如，如果 lab 包含 "BGM-{NICKNAME}"，此音频文件将被完全跳过。
     "{NICKNAME}": "{SKIP}"
+    "奥兹：": "{SKIP}"
