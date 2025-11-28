@@ -42,17 +42,17 @@ split:
 
 # --- SER (语音情感识别) 配置 ---
 ser:
-  enable: false # 设置为 true 以启用情感识别
+  enable: true # 设置为 true 以启用情感识别
   model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
   device: "auto" # "cuda", "cpu", "auto"
 
 # --- ASR (自动语音识别) 相关配置 ---
 asr:
-  language: "zh" # language 参数对 funasr 无直接作用，但可保留
+  language: "zh" 
   # FunASR 参数
   funasr:
     model: "paraformer-zh"
-    use_vad: false # 控制是否使用VAD (语音活动检测)。如果某些音频无法识别，可尝试设为 false
+    use_vad: false 
   whisperx:
     model: "large-v2"
     batch_size: 16
@@ -88,7 +88,6 @@ text:
     # {SKIP}: 跳过包含此占位符的音频
     # 例如，如果 lab 包含 "BGM-{NICKNAME}"，此音频文件将被完全跳过。
     "{NICKNAME}": "{SKIP}"
-    "奥兹：": "{SKIP}"
 
 # --- 输出配置 ---
 output:

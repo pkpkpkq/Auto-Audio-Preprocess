@@ -199,7 +199,7 @@ class DatasetProcessor:
 
     def _setup_paths_and_logging(self):
         """设置所有输出路径并配置日志记录。"""
-        self.base_output_dir = os.path.abspath("output")
+        self.base_output_dir = os.path.join(os.path.abspath("output"), self.folder_name)
         self.output_dir = os.path.join(self.base_output_dir, self.folder_name)
         os.makedirs(self.output_dir, exist_ok=True)
         print(f"[INFO] 主要音频输出将被保存到: {self.output_dir}")
