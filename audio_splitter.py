@@ -35,7 +35,10 @@ def split_wav_by_times(src_wav, split_times, outdir, base_name):
         if end is not None: cmd += ["-to", f"{end:.3f}"]
         cmd += ["-ar", str(fr), "-ac", str(nch), "-c:a", "pcm_s16le", out_path]
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"ffmpeg 切分超时 (300s): {src_wav}")
+            raise RuntimeError(f"ffmpeg 切分超时 (300s): {src_wav}")
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"ffmpeg 切分失败: {e}")
         out_wav_paths.append(out_path)
@@ -312,9 +315,39 @@ class AudioSplitter:
                     text_part = "".join(part_chars).strip()
 
             if not text_part:
-                self.logger.info("Character-based text split failed. Falling back to proportional text split.")
+                self.logger.info("Character-based text split failed. Falling back to sentence-boundary-aware text split.")
+                # Primary: split at sentence-ending punctuation
+                sent_puncs = ['。', '！', '？', '!', '?', '.', '…']
+                # Secondary: split at clause boundaries
+                clause_puncs = ['，', '、', '；', ';', ',']
+
                 start_char_pos = int(len(transcript) * (start_t / total_dur))
                 end_char_pos = int(len(transcript) * (end_t / total_dur))
+
+                # Clamp to valid range
+                start_char_pos = max(0, min(start_char_pos, len(transcript)))
+                end_char_pos = max(0, min(end_char_pos, len(transcript)))
+
+                # Adjust start: move forward to nearest sentence boundary after the proportional point
+                for offset in range(len(transcript) - start_char_pos):
+                    idx = start_char_pos + offset
+                    if idx > 0 and transcript[idx - 1] in sent_puncs:
+                        start_char_pos = idx
+                        break
+                    if offset > 0 and idx < len(transcript) and transcript[idx - 1] in clause_puncs:
+                        start_char_pos = idx
+                        break
+
+                # Adjust end: move backward to nearest sentence boundary before the proportional point
+                for offset in range(end_char_pos):
+                    idx = end_char_pos - offset
+                    if idx > 0 and transcript[idx - 1] in sent_puncs:
+                        end_char_pos = idx
+                        break
+                    if idx > 0 and transcript[idx - 1] in clause_puncs:
+                        end_char_pos = idx
+                        break
+
                 text_part = transcript[start_char_pos:end_char_pos].strip()
             
             text_parts.append(text_part)

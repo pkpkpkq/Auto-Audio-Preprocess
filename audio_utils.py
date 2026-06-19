@@ -87,7 +87,12 @@ def merge_wavs(output_path, wav_infos, config):
                 "-t", f"{silence_duration:.3f}",
                 "-ar", str(fr), "-ac", str(nch), "-c:a", "pcm_s16le", silence_path
             ]
-            subprocess.run(cmd_silence, check=True)
+            try:
+                subprocess.run(cmd_silence, check=True, timeout=300)
+            except subprocess.TimeoutExpired as e:
+                import logging
+                logging.getLogger(__name__).warning(f"生成静音音频超时: {e}")
+                raise RuntimeError("生成静音音频超时") from e
 
         for idx, info in enumerate(wav_infos):
             safe_path = info['path'].replace("'", "'\\'")
@@ -106,12 +111,18 @@ def merge_wavs(output_path, wav_infos, config):
             "-f", "concat", "-safe", "0", "-i", list_path,
             "-ar", str(fr), "-ac", str(nch), "-c:a", "pcm_s16le", output_path
         ]
-        subprocess.run(cmd, check=True)
+        try:
+            subprocess.run(cmd, check=True, timeout=300)
+        except subprocess.TimeoutExpired as e:
+            import logging
+            logging.getLogger(__name__).warning(f"ffmpeg 合并超时: {e}")
+            raise RuntimeError("ffmpeg 合并超时") from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"ffmpeg 合并失败: {e}")
     finally:
         for p in tmp_files_to_remove:
             try:
                 os.remove(p)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"清理临时文件失败: {p}, 错误: {e}")
