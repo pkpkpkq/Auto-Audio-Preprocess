@@ -10,6 +10,8 @@ from collections import defaultdict
 from asr import transcribe_audio
 from audio_splitter import split_batch
 import audio_utils as au
+import audio_normalizer as norm
+import audio_validator as val
 from ser import SpeechEmotionRecognizer
 
 class DatasetProcessor:
@@ -226,6 +228,9 @@ class DatasetProcessor:
         # self.out_list_path is now handled dynamically based on emotion
         # 将去重记录移动到角色文件夹下
         self.dedup_log_path = os.path.join(self.output_dir, "！去重记录.txt")
+        self.audit_report_path = os.path.join(self.output_dir, "！格式审计.txt")
+        self.clipping_report_path = os.path.join(self.output_dir, "！削波检测.txt")
+        self.quality_report_path = os.path.join(self.output_dir, "！质量报告.txt")
 
         self.logger = logging.getLogger("tts_preprocess")
         self.logger.setLevel(logging.INFO)
@@ -388,6 +393,44 @@ class DatasetProcessor:
             self.logger.warning(f"共跳过了 {total_skipped} 个文件（{skipped_pairing} 个缺少配对, {len(read_failures)} 个读取失败, {len(duplicate_log_lines)} 个内容重复, {skipped_rule_count} 个触发SKIP规则）。")
 
         return matched
+
+    def _normalize_audio(self, all_entries):
+        audio_config = self.audio_config or {}
+        if not audio_config:
+            return all_entries
+
+        trim_enabled = audio_config.get("trim_silence", {}).get("enable", False)
+        loudness_enabled = audio_config.get("loudness", {}).get("enable", False)
+
+        for index, entry in enumerate(all_entries, start=1):
+            current_path = entry["wav_path"]
+            stem = os.path.splitext(os.path.basename(current_path))[0]
+
+            if norm.needs_normalization(current_path, self.config):
+                normalized_path = os.path.join(self.temp_dir, f"norm_{index}_{stem}.wav")
+                norm.normalize_format(current_path, normalized_path, self.config)
+                entry["wav_path"] = normalized_path
+                entry["duration"] = norm.get_audio_duration_any(normalized_path)
+                current_path = normalized_path
+
+            if trim_enabled:
+                trim_stem = os.path.splitext(os.path.basename(current_path))[0]
+                trimmed_path = os.path.join(self.temp_dir, f"trim_{index}_{trim_stem}.wav")
+                norm.trim_silence(current_path, trimmed_path, self.config)
+                if os.path.exists(trimmed_path):
+                    entry["wav_path"] = trimmed_path
+                    entry["duration"] = norm.get_audio_duration_any(trimmed_path)
+                    current_path = trimmed_path
+
+            if loudness_enabled:
+                loud_stem = os.path.splitext(os.path.basename(current_path))[0]
+                loud_path = os.path.join(self.temp_dir, f"loud_{index}_{loud_stem}.wav")
+                norm.normalize_loudness(current_path, loud_path, self.config)
+                if os.path.exists(loud_path):
+                    entry["wav_path"] = loud_path
+                    entry["duration"] = norm.get_audio_duration_any(loud_path)
+
+        return all_entries
 
     def _process_short_files(self, short_list):
         """处理短音频，按情感分组后进行自动合并，并根据新规则处理剩余的孤立文件。"""
@@ -728,6 +771,23 @@ class DatasetProcessor:
         """执行完整的数据集处理流程。"""
         self._setup_paths_and_logging()
         all_entries = self._find_audio_entries()
+
+        if self.audio_config.get('audit', {}).get('enable', False):
+            audit_data = val.audit_audio_metadata(all_entries, self.config)
+            val.write_audit_report(audit_data, self.audit_report_path)
+
+        all_entries = self._normalize_audio(all_entries)
+
+        if self.audio_config.get('clipping_detection', {}).get('enable', False):
+            clipping_data = val.batch_detect_clipping(all_entries, self.config)
+            val.write_clipping_report(clipping_data, self.clipping_report_path)
+
+        if (
+            self.audio_config.get('silence_ratio', {}).get('enable', False)
+            or self.audio_config.get('snr_estimation', {}).get('enable', False)
+        ):
+            quality_data = val.batch_quality_check(all_entries, self.config)
+            val.write_quality_report(quality_data, self.quality_report_path)
 
         thresholds = self.config.get('split_and_merge', {'short_threshold': 2.0, 'long_threshold': 15.0})
         short_threshold = thresholds.get('short_threshold', 2.0)
