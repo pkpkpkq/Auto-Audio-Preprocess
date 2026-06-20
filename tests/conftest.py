@@ -7,7 +7,7 @@ import soundfile as sf
 
 def _sine(freq_hz: float, duration_s: float, sample_rate: int) -> np.ndarray:
     t = np.linspace(0.0, duration_s, int(sample_rate * duration_s), endpoint=False)
-    return np.sin(2.0 * np.pi * freq_hz * t).astype(np.float32)
+    return (0.5 * np.sin(2.0 * np.pi * freq_hz * t)).astype(np.float32)
 
 
 @pytest.fixture
@@ -75,8 +75,9 @@ def sample_wav_with_silence(tmp_path):
 @pytest.fixture
 def sample_wav_clipped(tmp_path):
     sr = 22050
-    tone = _sine(440.0, 0.5, sr)
-    over = np.clip(tone * 1.5, -1.0, 1.0).astype(np.float32)
+    t = np.linspace(0.0, 0.5, int(sr * 0.5), endpoint=False)
+    tone = np.sin(2.0 * np.pi * 440.0 * t).astype(np.float32)
+    over = np.clip(tone * 3.0, -1.0, 1.0).astype(np.float32)
     path = tmp_path / "sample_clipped.wav"
     sf.write(str(path), over, sr, subtype="PCM_16")
     return path
