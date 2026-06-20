@@ -92,3 +92,57 @@ text:
 # --- 输出配置 ---
 output:
   jsonl_output: true # 设置为 true 以便为每个 .list 文件生成一个对应的 .jsonl 格式的标注文件
+
+# --- 音频预处理配置 (新增) ---
+audio:
+  # 格式归一化
+  target_sample_rate: 44100    # 目标采样率 (Hz)
+  target_channels: 1           # 目标声道数 (1=单声道, 2=立体声)
+  target_bit_depth: 16         # 目标位深 (8, 16, 24, 32)
+  input_formats: ["wav", "flac", "mp3", "ogg", "aac", "m4a"]  # 支持的输入格式
+
+  # 首尾静音修剪
+  trim_silence:
+    enable: true
+    top_db: 30                 # 低于此分贝视为"静音"
+    frame_length: 2048         # 分析帧长
+    hop_length: 512            # 帧移
+    min_trim_ms: 100           # 至少切100ms才值得处理
+    keep_padding_ms: 50        # 前后各保留缓冲
+
+  # LUFS 响度归一化
+  loudness:
+    enable: true
+    target_lufs: -16           # 目标响度 (LUFS)，TTS建议-16, SVC建议-18
+    true_peak: -1.5            # True Peak 限制 (dB)
+    lra: 7                     # 响度范围限制 (LU)
+    dual_pass: false           # true=更精确的双pass, false=快速单pass
+
+  # DC偏移消除
+  dc_offset_removal:
+    enable: true               # 顺带在格式归一化中执行
+    threshold: 0.001           # DC偏移大于此值才处理
+
+  # 元数据审计
+  audit:
+    enable: true               # 生成格式审计报告
+
+  # 削波检测
+  clipping_detection:
+    enable: true
+    threshold_ratio: 0.01     # 超过1%样本削波才报警
+    clip_threshold: 0.99      # 振幅≥0.99视为削波
+
+  # 静默比例检测
+  silence_ratio:
+    enable: true
+    top_db: 30                # 定义静音的阈值
+    warn_threshold: 0.4       # 静默比例>40%警告
+    reject_threshold: 0.7     # 静默比例>70%拒绝
+
+  # VAD-SNR 估计
+  snr_estimation:
+    enable: true
+    top_db: 30                # VAD阈值
+    warn_db: 20               # SNR < 20dB 警告
+    reject_db: 15             # SNR < 15dB 拒绝
