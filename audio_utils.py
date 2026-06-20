@@ -38,6 +38,24 @@ def get_wav_duration_seconds(path):
         duration = frames / float(rate)
     return duration
 
+def get_audio_duration_seconds(path):
+    """获取任意 ffmpeg/librosa 支持的音频文件时长（秒）。
+
+    - 对 .wav 使用 stdlib wave 模块（零依赖、快速）
+    - 对其它格式回退到 librosa.get_duration (librosa 已在项目依赖中)
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".wav":
+        return get_wav_duration_seconds(path)
+    try:
+        import librosa
+        duration = float(librosa.get_duration(path=path))
+        if duration <= 0:
+            raise RuntimeError(f"librosa 返回非正时长: {duration}")
+        return duration
+    except Exception as e:
+        raise RuntimeError(f"librosa 获取 {path} 时长失败: {e}")
+
 def format_hms(total_seconds):
     total_secs = int(round(total_seconds))
     hours = total_secs // 3600

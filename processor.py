@@ -45,6 +45,8 @@ class DatasetProcessor:
         if self.ser_enabled:
             self.ser_recognizer = SpeechEmotionRecognizer(self.ser_config)
 
+        self.audio_config = self.config.get('audio', {})
+
         output_config = self.config.get('output', {})
         self.jsonl_output_enabled = output_config.get('jsonl_output', False)
 
@@ -246,10 +248,31 @@ class DatasetProcessor:
         self.logger.info(f"  - 替换规则: {self.replace_map}")
         self.logger.info("="*50)
 
+    @staticmethod
+    def _pick_primary_audio(stem, dirpath, extmap, config):
+        """在同 stem 的多个音频格式中选定主音频。优先级：.wav > 其余按 input_formats 顺序。
+
+        :param stem: 文件主干名（含递归路径）
+        :param dirpath: 所在目录
+        :param extmap: 扩展名到文件名的映射（含 ".lab"）
+        :param config: 整个音频配置 dict（含 'input_formats' 列表）
+        :return: 选定音频文件的完整路径，找不到任何支持的音频返回 None
+        """
+        input_formats = config.get("input_formats", ["wav"])
+        supported_exts = [f".{fmt.lower()}" for fmt in input_formats]
+        for fmt_ext in (".wav",) + tuple(e for e in supported_exts if e != ".wav"):
+            if fmt_ext in extmap:
+                return os.path.join(dirpath, extmap[fmt_ext])
+        return None
+
     def _find_audio_entries(self):
         """查找、配对、去重并读取所有音频条目及其元数据。"""
         import datetime
         stems = {}
+
+        input_formats = self.audio_config.get("input_formats", ["wav"])
+        supported_exts = {f".{fmt.lower()}" for fmt in input_formats}
+        supported_exts.add(".lab")
 
         if self.recursive:
             self.logger.info(f"开始递归扫描目录: {self.root_dir}")
@@ -257,7 +280,7 @@ class DatasetProcessor:
                 for fname in filenames:
                     name, ext = os.path.splitext(fname)
                     ext_lower = ext.lower()
-                    if ext_lower in (".wav", ".lab"):
+                    if ext_lower in supported_exts:
                         # 使用相对路径和文件名作为唯一键，避免冲突
                         relative_path = os.path.relpath(os.path.join(dirpath, name), self.root_dir)
                         unique_stem_key = os.path.normpath(relative_path)
@@ -272,12 +295,12 @@ class DatasetProcessor:
             for fname in file_entries:
                 name, ext = os.path.splitext(fname)
                 ext_lower = ext.lower()
-                if ext_lower in (".wav", ".lab"):
+                if ext_lower in supported_exts:
                     if name not in stems:
                         stems[name] = {"dirpath": self.root_dir}
                     stems[name][ext_lower] = fname
         
-        self.logger.info(f"找到 {len(stems)} 个带有 .wav 或 .lab 扩展名的唯一文件主干。")
+        self.logger.info(f"找到 {len(stems)} 个带有 {sorted(supported_exts)} 扩展名的唯一文件主干。")
 
         matched = []
         skipped_pairing = 0
@@ -290,16 +313,17 @@ class DatasetProcessor:
         stems_sorted = sorted(stems.items())
 
         for stem_key, extmap in stems_sorted:
-            if ".wav" not in extmap or ".lab" not in extmap:
+            if ".lab" not in extmap:
+                skipped_pairing += 1
+                continue
+
+            wav_path = self._pick_primary_audio(stem_key, extmap["dirpath"], extmap, self.audio_config)
+            if wav_path is None:
                 skipped_pairing += 1
                 continue
 
             dirpath = extmap["dirpath"]
-            # 从 extmap 中获取原始文件名，因为 stem_key 可能包含路径
-            wav_filename = extmap[".wav"]
             lab_filename = extmap[".lab"]
-            
-            wav_path = os.path.join(dirpath, wav_filename)
             lab_path = os.path.join(dirpath, lab_filename)
 
             try:
@@ -325,7 +349,7 @@ class DatasetProcessor:
                 seen_texts.add(lab_text)
 
             try:
-                duration = au.get_wav_duration_seconds(wav_path)
+                duration = au.get_audio_duration_seconds(wav_path)
             except Exception as e:
                 read_failures.append(f"{wav_path} (获取时长): {e}")
                 self.logger.warning(f"获取 {wav_path} 的时长失败: {e}")
