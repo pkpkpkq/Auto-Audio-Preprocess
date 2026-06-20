@@ -90,3 +90,16 @@ def test_very_short_file_loudnorm_does_not_crash(tmp_path, test_config):
     )
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_loudness_output_sample_rate_pinned(tmp_path, sample_wav_22k_mono, test_config):
+    out_path = str(tmp_path / "loud_out.wav")
+    normalize_loudness(str(sample_wav_22k_mono), out_path, test_config)
+    import wave
+    with wave.open(out_path, "rb") as wf:
+        sr = wf.getframerate()
+        ch = wf.getnchannels()
+        sw = wf.getsampwidth()
+    assert sr == test_config["audio"]["target_sample_rate"]
+    assert ch == test_config["audio"]["target_channels"]
+    assert sw == test_config["audio"]["target_bit_depth"] // 8

@@ -227,10 +227,16 @@ def normalize_loudness(input_path, output_path, config):
             ]
         )
 
+    audio_cfg = _audio_config(config)
+    target_sample_rate = str(int(audio_cfg.get("target_sample_rate", 44100)))
+    target_channels = str(int(audio_cfg.get("target_channels", 1)))
+
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", input_path,
         "-af", "loudnorm=" + ":".join(loudnorm_parts),
+        "-ar", target_sample_rate,
+        "-ac", target_channels,
         output_path,
     ]
 
