@@ -5,3 +5,5 @@ whisperx
 opencc-python-reimplemented
 PyYAML
 transformers
+pytest
+soundfile
