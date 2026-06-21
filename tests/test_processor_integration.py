@@ -24,7 +24,7 @@ def _install_heavy_import_stubs():
 
     _mkstub("asr", transcribe_audio=lambda *a, **k: [])
     _mkstub("funasr", AutoModel=None)
-    _mkstub("audio_splitter", split_batch=lambda *a, **k: {})
+    _mkstub("audio_splitter", AudioSplitter=lambda *a, **k: type("Stub", (), {"split": lambda self, pairs, outdir: {}})())
     _mkstub("ser", SpeechEmotionRecognizer=lambda *a, **k: None)
     _mkstub(
         "whisperx",
@@ -132,13 +132,13 @@ def _patch_fast_enabled_audio(monkeypatch, calls: list[str]) -> None:
         return output_path
 
     monkeypatch.setattr(processor.norm, "needs_normalization", lambda *_a, **_k: True)
-    monkeypatch.setattr(processor.norm, "get_audio_duration_any", duration)
+    monkeypatch.setattr(processor.au, "get_audio_duration_seconds", duration)
     monkeypatch.setattr(processor.norm, "normalize_format", lambda i, o, c: calls.append("normalize_format") or write_target(i, o, c))
     monkeypatch.setattr(processor.norm, "trim_silence", lambda i, o, c: calls.append("trim_silence") or write_target(i, o, c))
     monkeypatch.setattr(processor.norm, "normalize_loudness", lambda i, o, c: calls.append("normalize_loudness") or write_target(i, o, c))
     monkeypatch.setattr(processor.val, "audit_audio_metadata", lambda entries, config: calls.append("audit") or {"total": len(entries)})
-    monkeypatch.setattr(processor.val, "batch_detect_clipping", lambda entries, config: calls.append("clipping") or [{"wav_path": e["wav_path"], "clipped": False} for e in entries])
-    monkeypatch.setattr(processor.val, "batch_quality_check", lambda entries, config: calls.append("quality") or [{"wav_path": e["wav_path"], "silence_status": "ok", "snr_status": "ok"} for e in entries])
+    monkeypatch.setattr(processor.val, "batch_detect_clipping", lambda entries, config: calls.append("clipping") or [{"wav_path": e.path, "clipped": False} for e in entries])
+    monkeypatch.setattr(processor.val, "batch_quality_check", lambda entries, config: calls.append("quality") or [{"wav_path": e.path, "silence_status": "ok", "snr_status": "ok"} for e in entries])
     monkeypatch.setattr(processor.val, "write_audit_report", lambda data, path: Path(path).write_text("audit ok", encoding="utf-8"))
     monkeypatch.setattr(processor.val, "write_clipping_report", lambda data, path: Path(path).write_text("clipping ok", encoding="utf-8"))
     monkeypatch.setattr(processor.val, "write_quality_report", lambda data, path: Path(path).write_text("quality ok", encoding="utf-8"))

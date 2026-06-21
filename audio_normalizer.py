@@ -7,22 +7,7 @@ import shutil
 import subprocess
 import wave
 
-
-def _audio_config(config):
-    return config.get("audio", {})
-
-
-def _loudness_config(config):
-    return _audio_config(config).get("loudness", {}) if config else {}
-
-
-def _loudnorm_values(config):
-    loudness_cfg = _loudness_config(config)
-    return {
-        "target": float(loudness_cfg.get("target_lufs", -16)),
-        "lra": float(loudness_cfg.get("lra", 7)),
-        "tp": float(loudness_cfg.get("true_peak", -1.5)),
-    }
+from config_types import NormalizerConfig
 
 
 def _format_number(value):
@@ -43,39 +28,15 @@ def _parse_loudnorm_json(output):
         raise RuntimeError(f"ffmpeg loudnorm JSON解析失败: {e}") from e
 
 
-def get_audio_duration_any(path):
-    """获取任意 librosa 支持的音频时长；WAV 优先使用 stdlib wave。"""
-    path = os.fspath(path)
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".wav":
-        with contextlib.closing(wave.open(path, "rb")) as wf:
-            frames = wf.getnframes()
-            rate = wf.getframerate()
-            if rate == 0:
-                raise RuntimeError("采样率为0")
-            return frames / float(rate)
-
-    try:
-        import librosa
-
-        duration = float(librosa.get_duration(path=path))
-        if duration <= 0:
-            raise RuntimeError(f"librosa 返回非正时长: {duration}")
-        return duration
-    except Exception as e:
-        raise RuntimeError(f"librosa 获取 {path} 时长失败: {e}") from e
-
-
-def needs_normalization(input_path, config):
+def needs_normalization(input_path, config: NormalizerConfig):
     """判断输入音频是否需要归一化到目标 WAV 参数。"""
     input_path = os.fspath(input_path)
     if os.path.splitext(input_path)[1].lower() != ".wav":
         return True
 
-    audio_cfg = _audio_config(config)
-    target_sample_rate = int(audio_cfg.get("target_sample_rate", 44100))
-    target_channels = int(audio_cfg.get("target_channels", 1))
-    target_bit_depth = int(audio_cfg.get("target_bit_depth", 16))
+    target_sample_rate = config.target_sample_rate
+    target_channels = config.target_channels
+    target_bit_depth = config.target_bit_depth
     target_sampwidth = target_bit_depth // 8
 
     with contextlib.closing(wave.open(input_path, "rb")) as wf:
@@ -86,17 +47,15 @@ def needs_normalization(input_path, config):
         )
 
 
-def normalize_format(input_path, output_path, config):
+def normalize_format(input_path, output_path, config: NormalizerConfig):
     """用 ffmpeg 将任意支持格式转为目标 WAV PCM，不修改原始输入。"""
     input_path = os.fspath(input_path)
     output_path = os.fspath(output_path)
     if os.path.abspath(input_path) == os.path.abspath(output_path):
         raise ValueError("normalize_format 不允许覆盖原始输入文件")
 
-    audio_cfg = _audio_config(config)
-    target_sample_rate = int(audio_cfg.get("target_sample_rate", 44100))
-    target_channels = int(audio_cfg.get("target_channels", 1))
-    dc_cfg = audio_cfg.get("dc_offset_removal", {})
+    target_sample_rate = config.target_sample_rate
+    target_channels = config.target_channels
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -105,7 +64,7 @@ def normalize_format(input_path, output_path, config):
         "-ac", str(target_channels),
         "-c:a", "pcm_s16le",
     ]
-    if dc_cfg.get("enable", False):
+    if config.dc_offset_removal_enabled:
         cmd.extend(["-af", "highpass=f=5"])
     cmd.append(output_path)
 
@@ -122,7 +81,7 @@ def normalize_format(input_path, output_path, config):
     return output_path
 
 
-def trim_silence(input_path, output_path, config):
+def trim_silence(input_path, output_path, config: NormalizerConfig):
     input_path = os.fspath(input_path)
     output_path = os.fspath(output_path)
     if os.path.abspath(input_path) == os.path.abspath(output_path):
@@ -134,10 +93,9 @@ def trim_silence(input_path, output_path, config):
     except ImportError as e:
         raise RuntimeError(f"静音修剪依赖导入失败: {e}") from e
 
-    trim_cfg = _audio_config(config).get("trim_silence", {})
-    top_db = float(trim_cfg.get("top_db", 30))
-    keep_padding_ms = float(trim_cfg.get("keep_padding_ms", 50))
-    min_trim_ms = float(trim_cfg.get("min_trim_ms", 100))
+    top_db = config.trim_top_db
+    keep_padding_ms = config.trim_keep_padding_ms
+    min_trim_ms = config.trim_min_trim_ms
 
     try:
         y, sr = librosa.load(input_path, sr=None)
@@ -170,9 +128,13 @@ def trim_silence(input_path, output_path, config):
     return output_path
 
 
-def _measure_loudness(input_path, config=None):
+def _measure_loudness(input_path, config: NormalizerConfig):
     input_path = os.fspath(input_path)
-    values = _loudnorm_values(config)
+    values = {
+        "target": config.loudness_target_lufs,
+        "lra": config.loudness_lra,
+        "tp": config.loudness_true_peak,
+    }
     loudnorm_filter = (
         f"loudnorm=I={_format_number(values['target'])}:"
         f"LRA={_format_number(values['lra'])}:"
@@ -197,24 +159,27 @@ def _measure_loudness(input_path, config=None):
     return _parse_loudnorm_json((result.stderr or "") + "\n" + (result.stdout or ""))
 
 
-def normalize_loudness(input_path, output_path, config):
+def normalize_loudness(input_path, output_path, config: NormalizerConfig):
     input_path = os.fspath(input_path)
     output_path = os.fspath(output_path)
     if os.path.abspath(input_path) == os.path.abspath(output_path):
         raise ValueError("normalize_loudness 不允许覆盖原始输入文件")
 
-    loudness_cfg = _loudness_config(config)
-    if not loudness_cfg.get("enable", True):
+    if not config.loudness_enabled:
         shutil.copy2(input_path, output_path)
         return output_path
 
-    values = _loudnorm_values(config)
+    values = {
+        "target": config.loudness_target_lufs,
+        "lra": config.loudness_lra,
+        "tp": config.loudness_true_peak,
+    }
     target = _format_number(values["target"])
     lra = _format_number(values["lra"])
     tp = _format_number(values["tp"])
     loudnorm_parts = [f"I={target}", f"LRA={lra}", f"TP={tp}"]
 
-    if loudness_cfg.get("dual_pass", False):
+    if config.loudness_dual_pass:
         measured = _measure_loudness(input_path, config)
         loudnorm_parts.extend(
             [
@@ -227,9 +192,8 @@ def normalize_loudness(input_path, output_path, config):
             ]
         )
 
-    audio_cfg = _audio_config(config)
-    target_sample_rate = str(int(audio_cfg.get("target_sample_rate", 44100)))
-    target_channels = str(int(audio_cfg.get("target_channels", 1)))
+    target_sample_rate = str(config.target_sample_rate)
+    target_channels = str(config.target_channels)
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",

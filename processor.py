@@ -8,11 +8,13 @@ from collections import defaultdict
 
 # Local module imports
 from asr import transcribe_audio
-from audio_splitter import split_batch
+from audio_splitter import AudioSplitter
+from audio_entry import AudioEntry
 import audio_utils as au
 import audio_normalizer as norm
 import audio_validator as val
 from ser import SpeechEmotionRecognizer
+from config_types import NormalizerConfig, ValidatorConfig, SplitConfig, build_normalizer_config, build_validator_config, build_split_config
 
 class DatasetProcessor:
     """封装整个数据集处理流程的类"""
@@ -48,6 +50,10 @@ class DatasetProcessor:
             self.ser_recognizer = SpeechEmotionRecognizer(self.ser_config)
 
         self.audio_config = self.config.get('audio', {})
+
+        self._norm_config = build_normalizer_config(config)
+        self._val_config = build_validator_config(config)
+        self._split_config = build_split_config(config)
 
         output_config = self.config.get('output', {})
         self.jsonl_output_enabled = output_config.get('jsonl_output', False)
@@ -365,10 +371,14 @@ class DatasetProcessor:
                 self.logger.info(f"Running SER for {os.path.basename(wav_path)}")
                 emotion = self.ser_recognizer.predict_emotion(wav_path)
 
-            matched.append({
-                "stem": stem_key, "wav_path": wav_path, "lab_path": lab_path,
-                "lab_text": lab_text, "duration": duration, "emotion": emotion
-            })
+            matched.append(AudioEntry(
+                path=wav_path,
+                lab_text=lab_text,
+                duration=duration,
+                emotion=emotion,
+                stem=stem_key,
+                lab_path=lab_path,
+            ))
 
         if read_failures:
             print(f"[WARN] 文件读取期间遇到 {len(read_failures)} 个错误。详情请查看日志文件: {self.log_path}", file=sys.stderr)
@@ -399,36 +409,36 @@ class DatasetProcessor:
         if not audio_config:
             return all_entries
 
-        trim_enabled = audio_config.get("trim_silence", {}).get("enable", False)
-        loudness_enabled = audio_config.get("loudness", {}).get("enable", False)
+        trim_enabled = self._norm_config.trim_enabled
+        loudness_enabled = self._norm_config.loudness_enabled
 
         for index, entry in enumerate(all_entries, start=1):
-            current_path = entry["wav_path"]
+            current_path = entry.path
             stem = os.path.splitext(os.path.basename(current_path))[0]
 
-            if norm.needs_normalization(current_path, self.config):
+            if norm.needs_normalization(current_path, self._norm_config):
                 normalized_path = os.path.join(self.temp_dir, f"norm_{index}_{stem}.wav")
-                norm.normalize_format(current_path, normalized_path, self.config)
-                entry["wav_path"] = normalized_path
-                entry["duration"] = norm.get_audio_duration_any(normalized_path)
+                norm.normalize_format(current_path, normalized_path, self._norm_config)
+                entry.path = normalized_path
+                entry.duration = au.get_audio_duration_seconds(normalized_path)
                 current_path = normalized_path
 
             if trim_enabled:
                 trim_stem = os.path.splitext(os.path.basename(current_path))[0]
                 trimmed_path = os.path.join(self.temp_dir, f"trim_{index}_{trim_stem}.wav")
-                norm.trim_silence(current_path, trimmed_path, self.config)
+                norm.trim_silence(current_path, trimmed_path, self._norm_config)
                 if os.path.exists(trimmed_path):
-                    entry["wav_path"] = trimmed_path
-                    entry["duration"] = norm.get_audio_duration_any(trimmed_path)
+                    entry.path = trimmed_path
+                    entry.duration = au.get_audio_duration_seconds(trimmed_path)
                     current_path = trimmed_path
 
             if loudness_enabled:
                 loud_stem = os.path.splitext(os.path.basename(current_path))[0]
                 loud_path = os.path.join(self.temp_dir, f"loud_{index}_{loud_stem}.wav")
-                norm.normalize_loudness(current_path, loud_path, self.config)
+                norm.normalize_loudness(current_path, loud_path, self._norm_config)
                 if os.path.exists(loud_path):
-                    entry["wav_path"] = loud_path
-                    entry["duration"] = norm.get_audio_duration_any(loud_path)
+                    entry.path = loud_path
+                    entry.duration = au.get_audio_duration_seconds(loud_path)
 
         return all_entries
 
@@ -440,7 +450,7 @@ class DatasetProcessor:
         # 1. 按情感对短音频进行分组
         emotion_groups = defaultdict(list)
         for item in short_list:
-            emotion_groups[item['emotion']].append(item)
+            emotion_groups[item.emotion].append(item)
         
         self.logger.info(f"短音频按情感分组: { {e: len(v) for e, v in emotion_groups.items()} }")
         print(f"[INFO] Short audios grouped by emotion: { {e: len(v) for e, v in emotion_groups.items()} }")
@@ -478,10 +488,10 @@ class DatasetProcessor:
                     wav_infos = []
                     for item in group:
                         try:
-                            params, _ = au.read_wav_params_and_frames(item["wav_path"])
-                            wav_infos.append({"params": params, "path": item["wav_path"], "lab_text": item["lab_text"], "duration": item["duration"], "emotion": item["emotion"]})
+                            params, _ = au.read_wav_params_and_frames(item.path)
+                            wav_infos.append({"params": params, "path": item.path, "lab_text": item.lab_text, "duration": item.duration, "emotion": item.emotion})
                         except Exception as e:
-                            self.logger.warning(f"Reading wav for merge failed {item['wav_path']}: {e}")
+                            self.logger.warning(f"Reading wav for merge failed {item.path}: {e}")
                             processed_entries.append(item)
                     
                     merged_duration = sum(i['duration'] for i in wav_infos)
@@ -489,9 +499,9 @@ class DatasetProcessor:
                     merge_path = os.path.join(self.auto_merge_dir, merge_name)
 
                     try:
-                        au.merge_wavs(merge_path, wav_infos, self.config)
+                        au.merge_wavs(merge_path, wav_infos, self._split_config.merge_silence_duration)
                         merge_lab = "".join(i["lab_text"] for i in wav_infos)
-                        processed_entries.append({"wav_abs": os.path.abspath(merge_path), "lab_text": merge_lab, "duration": merged_duration, "emotion": emotion})
+                        processed_entries.append(AudioEntry(path=merge_path, lab_text=merge_lab, duration=merged_duration, emotion=emotion, origin="merge"))
                         
                         source_files_str = ", ".join([f"{os.path.basename(i['path'])} ({i['emotion']})" for i in wav_infos])
                         merge_map_lines.append(f"{os.path.basename(merge_path)} ({emotion}) <- [{source_files_str}]")
@@ -501,7 +511,7 @@ class DatasetProcessor:
 
             elif len(items) == 1:
                 item = items[0]
-                warning_msg = f"无法找到与 {os.path.basename(item['wav_path'])} ({item['emotion']}) 具有相同情感的音频进行合并，已暂存等待跨情感合并。"
+                warning_msg = f"无法找到与 {os.path.basename(item.path)} ({item.emotion}) 具有相同情感的音频进行合并，已暂存等待跨情感合并。"
                 self.logger.warning(warning_msg)
                 merge_map_lines.append(f"[警告] {warning_msg}")
                 leftover_items.append(item)
@@ -534,10 +544,10 @@ class DatasetProcessor:
                 wav_infos = []
                 for item in group:
                     try:
-                        params, _ = au.read_wav_params_and_frames(item["wav_path"])
-                        wav_infos.append({"params": params, "path": item["wav_path"], "lab_text": item["lab_text"], "duration": item["duration"], "emotion": item["emotion"]})
+                        params, _ = au.read_wav_params_and_frames(item.path)
+                        wav_infos.append({"params": params, "path": item.path, "lab_text": item.lab_text, "duration": item.duration, "emotion": item.emotion})
                     except Exception as e:
-                        self.logger.warning(f"Reading leftover wav for merge failed {item['wav_path']}: {e}")
+                        self.logger.warning(f"Reading leftover wav for merge failed {item.path}: {e}")
                         processed_entries.append(item)
 
                 if not wav_infos: continue
@@ -550,9 +560,9 @@ class DatasetProcessor:
                 merge_path = os.path.join(self.auto_merge_dir, merge_name)
 
                 try:
-                    au.merge_wavs(merge_path, wav_infos, self.config)
+                    au.merge_wavs(merge_path, wav_infos, self._split_config.merge_silence_duration)
                     merge_lab = "".join(i["lab_text"] for i in wav_infos)
-                    processed_entries.append({"wav_abs": os.path.abspath(merge_path), "lab_text": merge_lab, "duration": merged_duration, "emotion": result_emotion})
+                    processed_entries.append(AudioEntry(path=merge_path, lab_text=merge_lab, duration=merged_duration, emotion=result_emotion, origin="merge"))
                     
                     source_files_str = ", ".join([f"{os.path.basename(i['path'])} ({i['emotion']})" for i in wav_infos])
                     log_msg = f"{os.path.basename(merge_path)} ({result_emotion}) <- [{source_files_str}] (跨情感合并，选用第一个音频的情感)"
@@ -564,14 +574,9 @@ class DatasetProcessor:
                     processed_entries.extend(group)
         
         elif len(leftover_items) == 1:
-            # 如果最后只剩一个，无法合并，直接加入最终列表，并修正key
+            # 如果最后只剩一个，无法合并，直接加入最终列表
             item = leftover_items[0]
-            processed_entries.append({
-                "wav_abs": os.path.abspath(item["wav_path"]),
-                "lab_text": item["lab_text"],
-                "duration": item["duration"],
-                "emotion": item["emotion"]
-            })
+            processed_entries.append(item)
 
         return processed_entries, merge_map_lines
 
@@ -583,22 +588,29 @@ class DatasetProcessor:
         print(f"[INFO] 准备切分 {len(long_list)} 个长音频文件。")
         self.logger.info(f"准备对 {len(long_list)} 个长音频进行批量切分。")
 
-        pairs = [(m["wav_path"], m["lab_text"]) for m in long_list]
+        pairs = [(m.path, m.lab_text) for m in long_list]
         unsplit_entries = []
         split_entries = []
         
         try:
-            batch_results = split_batch(pairs, self.auto_split_dir, self.config, logger_arg=self.logger)
+            _splitter = AudioSplitter(self._split_config, logger_arg=self.logger)
+            _raw_results = _splitter.split(pairs, self.auto_split_dir)
+            batch_results = {}
+            for audio_path, res in _raw_results.items():
+                if res is None:
+                    batch_results[audio_path] = {"paths": None, "error": "split failed"}
+                else:
+                    batch_results[audio_path] = {"paths": res, "error": None}
         except Exception as e:
-            self.logger.error(f"批量切分函数'split_batch'执行失败: {e}")
+            self.logger.error(f"批量切分执行失败: {e}")
             # 如果批量切分失败，所有长音频都作为未切分处理，并保留其情感
             unsplit_entries.extend(long_list)
             return unsplit_entries, split_entries
 
         split_failures = []
         for m in long_list:
-            wavp = m["wav_path"]
-            original_emotion = m["emotion"] # 获取原始情感
+            wavp = m.path
+            original_emotion = m.emotion # 获取原始情感
             res = batch_results.get(wavp, {"paths": None, "error": "no result"})
             split_wav_paths = res.get("paths")
             
@@ -611,24 +623,13 @@ class DatasetProcessor:
                         duration = au.get_wav_duration_seconds(split_wav_path)
                         
                         # 切分后的文件继承原始情感
-                        split_entries.append({
-                            "wav_abs": os.path.abspath(split_wav_path),
-                            "lab_text": lab_text,
-                            "duration": duration,
-                            "is_split": True,
-                            "emotion": original_emotion 
-                        })
+                        split_entries.append(AudioEntry(path=split_wav_path, lab_text=lab_text, duration=duration, emotion=original_emotion, origin="split"))
                     except Exception as e:
                         self.logger.error(f"处理切分后的文件 {split_wav_path} 失败: {e}")
             else:
                 split_failures.append(os.path.basename(wavp))
-                # 切分失败的文件保留其原始信息，但要确保 key 是 'wav_abs'
-                unsplit_entries.append({
-                    "wav_abs": os.path.abspath(m["wav_path"]),
-                    "lab_text": m["lab_text"],
-                    "duration": m["duration"],
-                    "emotion": original_emotion
-                })
+                # 切分失败的文件保留其原始信息
+                unsplit_entries.append(m)
         
         if split_failures:
             print(f"[WARN] {len(split_failures)} 个长音频文件自动切分失败。", file=sys.stderr)
@@ -643,10 +644,10 @@ class DatasetProcessor:
         processed_filenames_by_emotion = defaultdict(set)
 
         for entry in final_entries:
-            source_path = entry["wav_abs"]
-            lab_text = entry["lab_text"]
-            is_split = entry.get("is_split", False)
-            emotion = entry.get("emotion", "neutral")
+            source_path = entry.absolute_path
+            lab_text = entry.lab_text
+            is_split = entry.origin == "split"
+            emotion = entry.emotion
 
             # 根据文件类型和情感确定输出目录
             if self.ser_enabled:
@@ -688,9 +689,15 @@ class DatasetProcessor:
                 else:
                     shutil.copy(source_path, target_path)
                 
-                entry_copy = entry.copy()
-                entry_copy["wav_abs"] = os.path.abspath(target_path)
-                final_output_entries_by_emotion[emotion].append(entry_copy)
+                final_output_entries_by_emotion[emotion].append(AudioEntry(
+                    path=os.path.abspath(target_path),
+                    lab_text=entry.lab_text,
+                    duration=entry.duration,
+                    emotion=entry.emotion,
+                    stem=entry.stem,
+                    lab_path=entry.lab_path,
+                    origin=entry.origin,
+                ))
 
             except Exception as e:
                 self.logger.error(f"复制或移动 {source_path} 到 {target_path} 失败: {e}")
@@ -720,7 +727,7 @@ class DatasetProcessor:
                  final_output_entries_by_emotion["neutral"] = all_entries
 
         for emotion, entries in final_output_entries_by_emotion.items():
-            emotion_duration = sum(e['duration'] for e in entries)
+            emotion_duration = sum(e.duration for e in entries)
             total_duration_seconds += emotion_duration
             summary_text = f"情感 '{emotion}': {len(entries)} 个文件, 总时长: {au.format_hms(emotion_duration)}"
             print(summary_text)
@@ -743,7 +750,7 @@ class DatasetProcessor:
 
             with open(list_path, "w", encoding="utf-8") as ol:
                 for ent in entries:
-                    ol.write(f"{ent['wav_abs']}|{self.folder_name}|ZH|{ent['lab_text']}\n")
+                    ol.write(f"{ent.absolute_path}|{self.folder_name}|ZH|{ent.lab_text}\n")
             self.logger.info(f"已生成列表文件: {list_path}")
             print(f"Generated list file: {list_path}")
 
@@ -754,9 +761,9 @@ class DatasetProcessor:
                 with open(jsonl_path, "w", encoding="utf-8") as f_jsonl:
                     for ent in entries:
                         json_record = {
-                            "id": os.path.basename(ent['wav_abs']),
-                            "audio": ent['wav_abs'],
-                            "text": ent['lab_text'],
+                            "id": os.path.basename(ent.absolute_path),
+                            "audio": ent.absolute_path,
+                            "text": ent.lab_text,
                             "speaker": self.folder_name
                         }
                         f_jsonl.write(json.dumps(json_record, ensure_ascii=False) + '\n')
@@ -772,53 +779,37 @@ class DatasetProcessor:
         self._setup_paths_and_logging()
         all_entries = self._find_audio_entries()
 
-        if self.audio_config.get('audit', {}).get('enable', False):
-            audit_data = val.audit_audio_metadata(all_entries, self.config)
+        if self._val_config.audit_enabled:
+            audit_data = val.audit_audio_metadata(all_entries, self._val_config)
             val.write_audit_report(audit_data, self.audit_report_path)
 
         all_entries = self._normalize_audio(all_entries)
 
-        if self.audio_config.get('clipping_detection', {}).get('enable', False):
-            clipping_data = val.batch_detect_clipping(all_entries, self.config)
+        if self._val_config.clipping_enabled:
+            clipping_data = val.batch_detect_clipping(all_entries, self._val_config)
             val.write_clipping_report(clipping_data, self.clipping_report_path)
 
-        if (
-            self.audio_config.get('silence_ratio', {}).get('enable', False)
-            or self.audio_config.get('snr_estimation', {}).get('enable', False)
-        ):
-            quality_data = val.batch_quality_check(all_entries, self.config)
+        if self._val_config.silence_ratio_enabled or self._val_config.snr_enabled:
+            quality_data = val.batch_quality_check(all_entries, self._val_config)
             val.write_quality_report(quality_data, self.quality_report_path)
 
         thresholds = self.config.get('split_and_merge', {'short_threshold': 2.0, 'long_threshold': 15.0})
         short_threshold = thresholds.get('short_threshold', 2.0)
         long_threshold = thresholds.get('long_threshold', 15.0)
 
-        short_list = [m for m in all_entries if m["duration"] <= short_threshold]
-        normal_list = [m for m in all_entries if short_threshold < m["duration"] < long_threshold]
-        long_list = [m for m in all_entries if m["duration"] >= long_threshold]
+        short_list = [m for m in all_entries if m.duration <= short_threshold]
+        normal_list = [m for m in all_entries if short_threshold < m.duration < long_threshold]
+        long_list = [m for m in all_entries if m.duration >= long_threshold]
         
         final_entries_before_copy = []
-        # 添加正常时长的文件, 并确保 key 为 'wav_abs'
-        final_entries_before_copy.extend([
-            {
-                "wav_abs": os.path.abspath(m["wav_path"]),
-                "lab_text": m["lab_text"],
-                "duration": m["duration"],
-                "emotion": m["emotion"]
-            } for m in normal_list
-        ])
+        # 添加正常时长的文件
+        final_entries_before_copy.extend(normal_list)
         
         # 处理长音频，同时接收未切分成功和已切分成功的文件
         unsplit_long_entries, split_entries = self._process_long_files(long_list)
         
-        # 对未切分成功的长音频，同样确保 key 为 'wav_abs'
-        for m in unsplit_long_entries:
-            final_entries_before_copy.append({
-                "wav_abs": os.path.abspath(m["wav_path"]),
-                "lab_text": m["lab_text"],
-                "duration": m["duration"],
-                "emotion": m["emotion"]
-            })
+        # 对未切分成功的长音频，保留原始条目
+        final_entries_before_copy.extend(unsplit_long_entries)
 
         final_entries_before_copy.extend(split_entries)
         

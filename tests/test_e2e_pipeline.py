@@ -26,7 +26,7 @@ def _install_heavy_import_stubs():
 
     _mkstub("asr", transcribe_audio=lambda *a, **k: [])
     _mkstub("funasr", AutoModel=None)
-    _mkstub("audio_splitter", split_batch=lambda *a, **k: {})
+    _mkstub("audio_splitter", AudioSplitter=lambda *a, **k: type("Stub", (), {"split": lambda self, pairs, outdir: {}})())
     _mkstub("ser", SpeechEmotionRecognizer=lambda *a, **k: None)
     _mkstub(
         "whisperx",
@@ -285,17 +285,21 @@ def test_short_merge_and_long_split_finalize_in_one_pipeline(tmp_path, monkeypat
     _make_wav(input_dir / "long.wav", 1.2, sr=44100)
     (input_dir / "long.lab").write_text("长音频", encoding="utf-8")
 
-    def fake_split_batch(pairs, out_dir, _config, logger_arg=None):
-        results = {}
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        for wav_path, lab_text in pairs:
-            split_path = Path(out_dir) / f"{Path(wav_path).stem}_part1.wav"
-            shutil.copy2(wav_path, split_path)
-            split_path.with_suffix(".lab").write_text(lab_text + "切分", encoding="utf-8")
-            results[wav_path] = {"paths": [str(split_path)], "error": None}
-        return results
+    class FakeSplitter:
+        def __init__(self, _config, logger_arg=None):
+            pass
 
-    monkeypatch.setattr(processor, "split_batch", fake_split_batch)
+        def split(self, pairs, out_dir):
+            results = {}
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            for wav_path, lab_text in pairs:
+                split_path = Path(out_dir) / f"{Path(wav_path).stem}_part1.wav"
+                shutil.copy2(wav_path, split_path)
+                split_path.with_suffix(".lab").write_text(lab_text + "切分", encoding="utf-8")
+                results[wav_path] = [str(split_path)]
+            return results
+
+    monkeypatch.setattr(processor, "AudioSplitter", FakeSplitter)
     config = _base_config(test_config, input_dir)
     config["split_and_merge"] = {
         "short_threshold": 0.3,

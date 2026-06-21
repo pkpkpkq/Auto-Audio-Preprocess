@@ -29,7 +29,7 @@ def _install_heavy_import_stubs():
 
     _mkstub("asr", transcribe_audio=lambda *a, **k: [])
     _mkstub("funasr", AutoModel=None)
-    _mkstub("audio_splitter", split_batch=lambda *a, **k: [])
+    _mkstub("audio_splitter", AudioSplitter=lambda *a, **k: type("Stub", (), {"split": lambda self, pairs, outdir: {}})())
     _mkstub("ser", SpeechEmotionRecognizer=lambda *a, **k: None)
     _mkstub("whisperx", load_model=lambda *a, **k: None,
                           align=lambda *a, **k: None,
@@ -158,10 +158,10 @@ class TestFindAudioEntriesMultiFormat:
         entries = proc._find_audio_entries()
         assert len(entries) == 1, f"Expected 1 entry, got {len(entries)}"
         e = entries[0]
-        assert e["wav_path"].endswith(".flac"), e["wav_path"]
-        assert e["lab_path"].endswith(".lab")
-        assert e["lab_text"] == "flac test entry"
-        assert e["duration"] > 0, f"Duration should be > 0, got {e['duration']}"
+        assert e.path.endswith(".flac"), e.path
+        assert e.lab_path.endswith(".lab")
+        assert e.lab_text == "flac test entry"
+        assert e.duration > 0, f"Duration should be > 0, got {e.duration}"
 
     def test_wav_priority_over_flac_same_stem(self, tmp_path):
         """QA#2 — When stem has BOTH .wav and .flac, .wav wins."""
@@ -171,7 +171,7 @@ class TestFindAudioEntriesMultiFormat:
         proc = _StubProcessor(tmp_path)
         entries = proc._find_audio_entries()
         assert len(entries) == 1, f"Expected 1 entry (no dup), got {len(entries)}"
-        assert entries[0]["wav_path"].endswith(".wav"), entries[0]["wav_path"]
+        assert entries[0].path.endswith(".wav"), entries[0].path
 
     def test_unsupported_format_skipped_silently(self, tmp_path):
         """QA#3 — .xyz not in input_formats is skipped without raising."""
@@ -190,7 +190,7 @@ class TestFindAudioEntriesMultiFormat:
         proc = _StubProcessor(tmp_path, input_formats=["wav"])
         entries = proc._find_audio_entries()
         assert len(entries) == 1, f"Expected 1 entry, got {len(entries)}"
-        assert entries[0]["wav_path"].endswith("legacy.wav"), entries[0]["wav_path"]
+        assert entries[0].path.endswith("legacy.wav"), entries[0].path
 
     def test_duration_librosa_for_flac(self, tmp_path):
         """QA#4 — non-WAV duration comes from librosa.get_duration (not wave module)."""
@@ -199,5 +199,5 @@ class TestFindAudioEntriesMultiFormat:
         proc = _StubProcessor(tmp_path)
         entries = proc._find_audio_entries()
         assert len(entries) == 1
-        d = entries[0]["duration"]
+        d = entries[0].duration
         assert 0.65 < d < 0.75, f"Expected duration ~0.7s, got {d}"

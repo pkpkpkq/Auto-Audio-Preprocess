@@ -8,14 +8,22 @@ import subprocess
 import librosa
 import numpy as np
 
+from audio_entry import AudioEntry
+from config_types import ValidatorConfig
+
 logger = logging.getLogger(__name__)
 
 
-def compute_silence_ratio(input_path: str, config: dict) -> dict:
-    sr_cfg = config.get("audio", {}).get("silence_ratio", {})
-    top_db = sr_cfg.get("top_db", 30)
-    warn_threshold = sr_cfg.get("warn_threshold", 0.4)
-    reject_threshold = sr_cfg.get("reject_threshold", 0.7)
+def _write_report(lines: list[str], output_path: str) -> None:
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def compute_silence_ratio(input_path: str, config: ValidatorConfig) -> dict:
+    top_db = config.silence_ratio_top_db
+    warn_threshold = config.silence_warn_threshold
+    reject_threshold = config.silence_reject_threshold
 
     y, sr = librosa.load(input_path, sr=None, mono=True)
     intervals = librosa.effects.split(y, top_db=top_db)
@@ -40,11 +48,10 @@ def compute_silence_ratio(input_path: str, config: dict) -> dict:
     }
 
 
-def estimate_snr(input_path: str, config: dict) -> dict:
-    snr_cfg = config.get("audio", {}).get("snr_estimation", {})
-    top_db = snr_cfg.get("top_db", 30)
-    warn_db = snr_cfg.get("warn_db", 20)
-    reject_db = snr_cfg.get("reject_db", 15)
+def estimate_snr(input_path: str, config: ValidatorConfig) -> dict:
+    top_db = config.snr_top_db
+    warn_db = config.snr_warn_db
+    reject_db = config.snr_reject_db
 
     y, sr = librosa.load(input_path, sr=None, mono=True)
     intervals = librosa.effects.split(y, top_db=top_db)
@@ -76,13 +83,13 @@ def estimate_snr(input_path: str, config: dict) -> dict:
     return {"snr": round(float(snr), 2), "reliable": True, "status": status}
 
 
-def batch_quality_check(entries: list[dict], config: dict) -> list[dict]:
-    sr_enable = config.get("audio", {}).get("silence_ratio", {}).get("enable", True)
-    snr_enable = config.get("audio", {}).get("snr_estimation", {}).get("enable", True)
+def batch_quality_check(entries: list[AudioEntry], config: ValidatorConfig) -> list[dict]:
+    sr_enable = config.silence_ratio_enabled
+    snr_enable = config.snr_enabled
 
     results = []
     for entry in entries:
-        wav_path = entry.get("wav_path", "")
+        wav_path = entry.path
         if not wav_path or not os.path.isfile(wav_path):
             logger.warning(f"跳过无效路径: {wav_path}")
             results.append({
@@ -151,26 +158,18 @@ def write_quality_report(quality_data: list[dict], output_path: str) -> None:
     total = len(quality_data)
     lines.append(f"总计: {total} 个文件, 警告: {warn_count}, 拒绝: {reject_count}")
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    _write_report(lines, output_path)
     logger.info(f"质量报告已写入: {output_path}")
 
 
-# --- T7 stubs: audit_audio_metadata, detect_clipping, batch_detect_clipping,
-#     write_audit_report, write_clipping_report ---
-# T7 will provide full implementations. Stubs below prevent ImportError.
-
-def audit_audio_metadata(entries: list[dict], config: dict) -> dict:
-    audio_cfg = config.get("audio", {})
-    audit_cfg = audio_cfg.get("audit", {})
-    if not audit_cfg.get("enable", True):
+def audit_audio_metadata(entries: list[AudioEntry], config: ValidatorConfig) -> dict:
+    if not config.audit_enabled:
         return {"total": 0, "sample_rates": {}, "bit_depths": {}, "channels": {},
                 "needs_conversion": [], "errors": [], "skipped": True}
 
-    target_sr = audio_cfg.get("target_sample_rate", 44100)
-    target_ch = audio_cfg.get("target_channels", 1)
-    target_bd = audio_cfg.get("target_bit_depth", 16)
+    target_sr = config.target_sample_rate
+    target_ch = config.target_channels
+    target_bd = config.target_bit_depth
 
     from collections import Counter
     import wave
@@ -182,7 +181,7 @@ def audit_audio_metadata(entries: list[dict], config: dict) -> dict:
     errors: list[str] = []
 
     for entry in entries:
-        wav_path = entry.get("wav_path", "")
+        wav_path = entry.path
         if not wav_path or not isinstance(wav_path, str):
             errors.append(f"missing: {wav_path}")
             continue
@@ -247,16 +246,15 @@ def audit_audio_metadata(entries: list[dict], config: dict) -> dict:
     }
 
 
-def detect_clipping(input_path: str, config: dict) -> dict:
-    cfg = config.get("audio", {}).get("clipping_detection", {})
-    if not cfg.get("enable", True):
+def detect_clipping(input_path: str, config: ValidatorConfig) -> dict:
+    if not config.clipping_enabled:
         return {"skipped": True}
     import soundfile as sf
     data, sr = sf.read(input_path, dtype="float32")
     if data.ndim > 1:
         data = data.mean(axis=1)
-    clip_threshold = cfg.get("clip_threshold", 0.99)
-    threshold_ratio = cfg.get("threshold_ratio", 0.01)
+    clip_threshold = config.clip_threshold
+    threshold_ratio = config.threshold_ratio
     clipped_samples = int(np.sum(np.abs(data) >= clip_threshold))
     total = len(data)
     clip_percentage = (clipped_samples / total) * 100.0 if total > 0 else 0.0
@@ -270,13 +268,12 @@ def detect_clipping(input_path: str, config: dict) -> dict:
     }
 
 
-def batch_detect_clipping(entries: list[dict], config: dict) -> list[dict]:
-    cfg = config.get("audio", {}).get("clipping_detection", {})
-    if not cfg.get("enable", True):
+def batch_detect_clipping(entries: list[AudioEntry], config: ValidatorConfig) -> list[dict]:
+    if not config.clipping_enabled:
         return [{"skipped": True}]
     results = []
     for entry in entries:
-        wav_path = entry.get("wav_path", "")
+        wav_path = entry.path
         if not wav_path or not os.path.isfile(wav_path):
             continue
         try:
@@ -312,9 +309,7 @@ def write_audit_report(audit_data: dict, output_path: str) -> None:
         lines.append("错误:")
         for item in errors:
             lines.append(f"  {item}")
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    _write_report(lines, output_path)
 
 
 def write_clipping_report(clipping_data: list[dict], output_path: str) -> None:
@@ -326,6 +321,4 @@ def write_clipping_report(clipping_data: list[dict], output_path: str) -> None:
         peak = item.get("peak_dbfs", "N/A")
         status = "削波" if clipped else "正常"
         lines.append(f"{wav}  {status}  削波比例={pct}%  峰值={peak}dBFS")
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    _write_report(lines, output_path)

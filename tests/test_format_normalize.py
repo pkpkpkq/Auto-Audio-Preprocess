@@ -12,7 +12,9 @@ import pytest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-from audio_normalizer import get_audio_duration_any, needs_normalization, normalize_format  # noqa: E402
+from audio_normalizer import needs_normalization, normalize_format  # noqa: E402
+from audio_utils import get_audio_duration_seconds as get_audio_duration_any  # noqa: E402
+from config_types import NormalizerConfig, build_normalizer_config  # noqa: E402
 
 
 def _audio_config(test_config, *, sample_rate=44100, channels=1, bit_depth=16, dc_offset=False):
@@ -21,7 +23,7 @@ def _audio_config(test_config, *, sample_rate=44100, channels=1, bit_depth=16, d
     cfg["audio"]["target_channels"] = channels
     cfg["audio"]["target_bit_depth"] = bit_depth
     cfg["audio"]["dc_offset_removal"]["enable"] = dc_offset
-    return cfg
+    return build_normalizer_config(cfg)
 
 
 def _wav_params(path):

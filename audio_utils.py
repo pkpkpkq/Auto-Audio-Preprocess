@@ -30,7 +30,7 @@ def read_lab(path):
     return content
 
 def get_wav_duration_seconds(path):
-    with contextlib.closing(wave.open(path, "rb")) as wf:
+    with contextlib.closing(wave.open(os.fspath(path), "rb")) as wf:
         frames = wf.getnframes()
         rate = wf.getframerate()
         if rate == 0:
@@ -78,14 +78,12 @@ def read_wav_params_and_frames(path):
         "nframes": params.nframes
     }, frames
 
-def merge_wavs(output_path, wav_infos, config):
+def merge_wavs(output_path, wav_infos, silence_duration: float):
     """
     使用 ffmpeg concat 来合并音频，避免一次性加载大量 PCM 到内存中。
     """
     if not wav_infos:
         raise ValueError("没有 wav 可合并")
-    
-    silence_duration = config.get('split_and_merge', {}).get('merge_silence_duration', 0.5)
 
     base = wav_infos[0]["params"]
     nch = base["nchannels"]

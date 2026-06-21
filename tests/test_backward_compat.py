@@ -24,7 +24,7 @@ def _install_heavy_import_stubs():
 
     _mkstub("asr", transcribe_audio=lambda *a, **k: [])
     _mkstub("funasr", AutoModel=None)
-    _mkstub("audio_splitter", split_batch=lambda *a, **k: {})
+    _mkstub("audio_splitter", AudioSplitter=lambda *a, **k: type("Stub", (), {"split": lambda self, pairs, outdir: {}})())
     _mkstub("ser", SpeechEmotionRecognizer=lambda *a, **k: None)
     _mkstub(
         "whisperx",

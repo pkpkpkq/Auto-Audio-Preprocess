@@ -11,6 +11,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 from audio_normalizer import trim_silence  # noqa: E402
+from config_types import build_normalizer_config  # noqa: E402
 
 
 EVIDENCE_DIR = os.path.join(REPO_ROOT, ".sisyphus", "evidence")
@@ -25,7 +26,7 @@ def _trim_config(test_config, *, top_db=30, min_trim_ms=100, keep_padding_ms=50)
             "keep_padding_ms": keep_padding_ms,
         }
     )
-    return cfg
+    return build_normalizer_config(cfg)
 
 
 def _duration(path):

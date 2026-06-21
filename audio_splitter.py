@@ -16,6 +16,7 @@ import numpy as np
 import whisperx
 
 import audio_utils as au
+from config_types import SplitConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,27 +46,102 @@ def split_wav_by_times(src_wav, split_times, outdir, base_name):
     return out_wav_paths
 
 
+def plan_splits(total_dur: float, silence_spans: list, min_duration: float, max_duration: float) -> list[float] | None:
+    potential_cuts = sorted(
+        [{'time': s[1], 'score': s[1] - s[0]} for s in silence_spans],
+        key=lambda x: x['time']
+    )
+
+    # dp[t] = (min_cuts, max_score_for_min_cuts, list_of_split_times)
+    dp = {0.0: (0, 0.0, [])}
+    sorted_dp_keys = [0.0]
+
+    for cut_point in potential_cuts:
+        t_end = cut_point['time']
+        score = cut_point['score']
+        
+        for t_start in sorted_dp_keys:
+            if t_start >= t_end:
+                continue
+            
+            segment_duration = t_end - t_start
+            if min_duration <= segment_duration <= max_duration:
+                prev_cuts, prev_score, prev_splits = dp[t_start]
+                new_cuts = prev_cuts + 1
+                new_score = prev_score + score
+                
+                current_cuts, current_score, _ = dp.get(t_end, (float('inf'), -1.0, []))
+
+                # Primary goal: fewer cuts. Secondary goal: better score.
+                if new_cuts < current_cuts:
+                    dp[t_end] = (new_cuts, new_score, prev_splits + [t_end])
+                elif new_cuts == current_cuts and new_score > current_score:
+                    dp[t_end] = (new_cuts, new_score, prev_splits + [t_end])
+
+        if t_end in dp and t_end not in sorted_dp_keys:
+            sorted_dp_keys.append(t_end)
+            sorted_dp_keys.sort()
+
+    # Find the best overall plan
+    best_plan = None
+    min_total_cuts = float('inf')
+    max_final_score = -1.0
+
+    # Check the no-cut scenario first
+    if total_dur <= max_duration:
+        min_total_cuts = 0
+        max_final_score = 0.0
+        best_plan = []
+
+    for t, (cuts, score, splits) in dp.items():
+        if min_duration <= (total_dur - t) <= max_duration:
+            if cuts < min_total_cuts:
+                min_total_cuts = cuts
+                max_final_score = score
+                best_plan = splits
+            elif cuts == min_total_cuts and score > max_final_score:
+                max_final_score = score
+                best_plan = splits
+
+    if best_plan is not None:
+        if best_plan and best_plan[-1] >= total_dur:
+             best_plan = best_plan[:-1]
+            
+    return best_plan
+
+
+def adjust_punctuation(text_parts: list[str]) -> list[str]:
+    punctuations = ".,!?;:。，！？；：…"
+    for i in range(1, len(text_parts)):
+        # If the current sentence is not empty and starts with punctuation,
+        # and the previous sentence is not empty.
+        if text_parts[i] and text_parts[i][0] in punctuations and text_parts[i-1]:
+            punc = text_parts[i][0]
+            # Move punctuation from current sentence start to previous sentence end
+            text_parts[i-1] += punc
+            text_parts[i] = text_parts[i][1:].lstrip()
+    return text_parts
+
+
 class AudioSplitter:
-    def __init__(self, config, logger_arg=None):
+    def __init__(self, config: SplitConfig, logger_arg=None):
         self.config = config
         self.logger = logger_arg or logger
         
-        split_config = config.get('split_and_merge', {}).get('split', {})
-        
-        device_setting = split_config.get('device', 'auto')
+        device_setting = config.device
         if device_setting == 'auto':
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device_setting
         
-        self.lang = split_config.get('language', 'zh')
-        self.max_duration = split_config.get('max_duration', 15.0)
-        self.min_duration = split_config.get('min_duration', 2.0)
-        self.max_segments = split_config.get('max_segments', 8)
+        self.lang = config.language
+        self.max_duration = config.max_duration
+        self.min_duration = config.min_duration
+        self.max_segments = config.max_segments
         
-        self.split_min_silence_len_ms = split_config.get('split_min_silence_len_ms', 300)
-        self.split_offset_from_silence_end_ms = split_config.get('split_offset_from_silence_end_ms', 0)
-        self.split_silence_top_db = split_config.get('split_silence_top_db', 40)
+        self.split_min_silence_len_ms = config.split_min_silence_len_ms
+        self.split_offset_from_silence_end_ms = config.split_offset_from_silence_end_ms
+        self.split_silence_top_db = config.split_silence_top_db
 
         self.align_model = None
         self.align_metadata = None
@@ -131,86 +207,6 @@ class AudioSplitter:
             self.logger.error(f"Failed to find silence spans in {audio_path}: {e}", exc_info=True)
             return []
 
-    def _plan_splits(self, total_dur, silence_spans):
-        potential_cuts = sorted(
-            [{'time': s[1], 'score': s[1] - s[0]} for s in silence_spans],
-            key=lambda x: x['time']
-        )
-
-        # dp[t] = (min_cuts, max_score_for_min_cuts, list_of_split_times)
-        dp = {0.0: (0, 0.0, [])}
-        sorted_dp_keys = [0.0]
-
-        for cut_point in potential_cuts:
-            t_end = cut_point['time']
-            score = cut_point['score']
-            
-            for t_start in sorted_dp_keys:
-                if t_start >= t_end:
-                    continue
-                
-                segment_duration = t_end - t_start
-                if self.min_duration <= segment_duration <= self.max_duration:
-                    prev_cuts, prev_score, prev_splits = dp[t_start]
-                    new_cuts = prev_cuts + 1
-                    new_score = prev_score + score
-                    
-                    current_cuts, current_score, _ = dp.get(t_end, (float('inf'), -1.0, []))
-
-                    # Primary goal: fewer cuts. Secondary goal: better score.
-                    if new_cuts < current_cuts:
-                        dp[t_end] = (new_cuts, new_score, prev_splits + [t_end])
-                    elif new_cuts == current_cuts and new_score > current_score:
-                        dp[t_end] = (new_cuts, new_score, prev_splits + [t_end])
-
-            if t_end in dp and t_end not in sorted_dp_keys:
-                sorted_dp_keys.append(t_end)
-                sorted_dp_keys.sort()
-
-        # Find the best overall plan
-        best_plan = None
-        min_total_cuts = float('inf')
-        max_final_score = -1.0
-
-        # Check the no-cut scenario first
-        if self.min_duration <= total_dur <= self.max_duration:
-            min_total_cuts = 0
-            max_final_score = 0.0
-            best_plan = []
-
-        for t, (cuts, score, splits) in dp.items():
-            if self.min_duration <= (total_dur - t) <= self.max_duration:
-                if cuts < min_total_cuts:
-                    min_total_cuts = cuts
-                    max_final_score = score
-                    best_plan = splits
-                elif cuts == min_total_cuts and score > max_final_score:
-                    max_final_score = score
-                    best_plan = splits
-
-        if best_plan is not None:
-            if best_plan and best_plan[-1] >= total_dur:
-                 best_plan = best_plan[:-1]
-            self.logger.info(f"Found best plan with {len(best_plan)} cuts.")
-        else:
-            self.logger.warning("Could not find a valid split plan.")
-            
-        return best_plan
-
-    def _adjust_punctuation(self, text_parts):
-        self.logger.info("Adjusting punctuation between split segments...")
-        punctuations = ".,!?;:。，！？；：…"
-        for i in range(1, len(text_parts)):
-            # If the current sentence is not empty and starts with punctuation,
-            # and the previous sentence is not empty.
-            if text_parts[i] and text_parts[i][0] in punctuations and text_parts[i-1]:
-                punc = text_parts[i][0]
-                # Move punctuation from current sentence start to previous sentence end
-                text_parts[i-1] += punc
-                text_parts[i] = text_parts[i][1:].lstrip()
-                self.logger.info(f"Moved punctuation '{punc}' from start of segment {i+1} to end of segment {i}.")
-        return text_parts
-
     def _split_single(self, audio_path, transcript, outdir):
         audio_path = os.path.abspath(audio_path)
         outdir = os.path.abspath(outdir)
@@ -240,8 +236,9 @@ class AudioSplitter:
             self.logger.info(f"WhisperX Alignment for '{os.path.basename(audio_path)}' took {align_duration:.2f} seconds.")
             silence_spans = self._find_silence_spans(audio_path)
             if silence_spans:
-                planned_splits = self._plan_splits(total_dur, silence_spans)
+                planned_splits = plan_splits(total_dur, silence_spans, self.min_duration, self.max_duration)
                 if planned_splits is not None:
+                    self.logger.info(f"Found best plan with {len(planned_splits)} cuts.")
                     offset_s = self.split_offset_from_silence_end_ms / 1000.0
                     split_times = [t + offset_s for t in planned_splits]
                     self.logger.info(f"Final split times: {[round(t, 2) for t in split_times]}")
@@ -353,7 +350,8 @@ class AudioSplitter:
             text_parts.append(text_part)
 
         # Adjust punctuation between segments
-        adjusted_text_parts = self._adjust_punctuation(text_parts)
+        self.logger.info("Adjusting punctuation between split segments...")
+        adjusted_text_parts = adjust_punctuation(text_parts)
 
         # Write the final lab files
         for i, text_part in enumerate(adjusted_text_parts):
@@ -386,14 +384,3 @@ class AudioSplitter:
                 print(f"[WARN] Split failed for {audio_path}: {e}", file=sys.stderr)
                 results[audio_path] = None
         return results
-
-def split_batch(pairs, outdir, config, logger_arg=None):
-    splitter = AudioSplitter(config, logger_arg=logger_arg)
-    raw_results = splitter.split(pairs, outdir)
-    wrapped = {}
-    for audio, res in raw_results.items():
-        if res is None:
-            wrapped[audio] = {"paths": None, "error": "split failed"}
-        else:
-            wrapped[audio] = {"paths": res, "error": None}
-    return wrapped
