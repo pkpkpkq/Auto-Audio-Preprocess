@@ -1,67 +1,39 @@
 # 数据集处理配置
 
-# --- 核心路径配置 ---
-# 输入目录：包含 .wav 和 .lab 文件的原始数据集文件夹
+# ============================================================
+# 通用约定:
+#   TTS = 文本转语音（语音合成）训练数据
+#   SVC = 歌声转换（Singing Voice Conversion）训练数据
+#   推荐值格式: TTS=值 / SVC=值
+#
+# 配置项按管道执行顺序排列:
+#   1.输入扫描 → 2.文本处理 → 3.格式审计 → 4.音频归一化
+#   → 5.削波检测 → 6.质量检测 → 7.情感分类 → 8.时长分类与处理
+#   → 9.输出 → 10.清理缓存
+# ============================================================
+
+# ============================================================
+# 1.输入扫描
+# 扫描目录中音频 + .lab 配对文件, 同内容 hash 去重, 多格式优先选 .wav
+# ============================================================
+# 输入目录：包含音频和 .lab 文件的原始数据集文件夹
 root_dir: ''
 # 是否递归处理输入目录下的所有子文件夹
-# true: 处理所有子文件夹
+# true:  处理所有子文件夹中的文件
 # false: 仅处理根目录下的文件
 recursive: true
 
-# --- 文件处理配置 ---
-# 是否使用 .lab 文件的内容作为最终输出的音频文件名
-# true: 使用标注文本命名 (例如 "你好世界.wav")
-# false: 保留原始文件名或生成新格式 (例如 "角色名_merge_1.wav")
-use_lab_text_as_filename: false
-
-# --- 音频处理配置 ---
-# 切分与合并的配置
-# gpt-sovits 3-25s 
-# so-vits-svc 2-15s
-split_and_merge:
-  short_threshold: 3.0  # 小于等于此值为短音频 (会被合并)
-  long_threshold: 25.0  # 大于等于此值为长音频 (会被切分)
-  merge_silence_duration: 0.3 # 合并短音频时，在片段之间插入的静音时长 (秒)
-  output_to_split_folder: false # true: 将切分文件输出到 "切分后" 子文件夹; false: 和其他文件一起输出
-
-# --- 长音频切分配置 ---
-split:
-  # --- 模型与设备 ---
-  device: "auto"              # "cuda", "cpu", "auto"
-  language: "zh"              # whisperx 使用的语言代码
-
-  # --- 切分策略 ---
-  min_duration: 3.0             # 切分后单段最小时长
-  max_duration: 25.0            # 切分后单段最大时长
-  max_segments: 5               # 单个长音频最多切成几段
-
-  # --- 静音检测与切分点 ---
-  split_silence_top_db: 40      # 定义“静音”的响度阈值 (值越大, 越不容易被识别为静音)
-  split_min_silence_len_ms: 500 # 最小静音时长 (毫秒), 用于过滤字间停顿
-  split_offset_from_silence_end_ms: 0 # 在静音区段末尾的偏移量 (毫秒), 负数表示提前
-
-# --- SER (语音情感识别) 配置 ---
-ser:
-  enable: true # 设置为 true 以启用情感识别
-  model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
-  device: "auto" # "cuda", "cpu", "auto"
-
-# --- ASR (自动语音识别) 相关配置 ---
-asr:
-  language: "zh" 
-  # FunASR 参数
-  funasr:
-    model: "paraformer-zh"
-    use_vad: false 
-  whisperx:
-    model: "large-v2"
-    batch_size: 16
-
-# --- 文本处理配置 ---
+# ============================================================
+# 2.文本处理 (扫描阶段)
+# 扫描 .lab 文件时执行: 繁→简, 替换规则, {SKIP}/{ASR} 占位符
+# ============================================================
 text:
-  # 繁体转简体
+  # 繁体转简体 (使用 OpenCC)
   t2s: true
-  # 文本替换规则
+  # 文本替换规则: 键=要替换的文本, 值=替换后的文本
+  # 支持特殊占位符:
+  #   {SKIP}  — 跳过包含此占位符的音频
+  #   {ASR}   — 用语音识别结果替换占位符 (需 asr 配合)
   replace_map:
     "|": ""
     "\n": " "
@@ -81,7 +53,7 @@ text:
     "{PLAYERAVATARSEXPRO[INFO_MALE_PRONOUN_HEINFO_FEMALE_PRONOUN_SHE]}": "他"
     
     # --- 特殊规则 ---
-    # {ASR}: 将占位符替换为语音识别结果（未完成）
+    # {ASR}: 将占位符替换为语音识别结果
     # 例如，如果 lab 包含 "你好，{PLAYER_NAME}"，并且此规则存在，
     # 程序会识别整个音频，并尝试用识别出的内容替换 {PLAYER_NAME}。
     
@@ -89,60 +61,328 @@ text:
     # 例如，如果 lab 包含 "BGM-{NICKNAME}"，此音频文件将被完全跳过。
     "{NICKNAME}": "{SKIP}"
 
-# --- 输出配置 ---
-output:
-  jsonl_output: true # 设置为 true 以便为每个 .list 文件生成一个对应的 .jsonl 格式的标注文件
+# --- ASR (自动语音识别) ---
+# 在扫描阶段为 {ASR} 占位符提供语音识别, 在切分阶段为长音频提供 whisperX 强制对齐
+asr:
+  language: "zh"  # ASR 语言: "zh" 中文, "en" 英文, "ja" 日文 等
+  # FunASR 参数 (Paraformer 中文语音识别模型)
+  funasr:
+    model: "paraformer-zh"   # FunASR 模型: paraformer-zh (中文), paraformer-zh-streaming (流式)
+    use_vad: false            # 是否使用语音活动检测 (VAD) 分段长音频
+  # WhisperX 参数 (基于 Whisper 的强制对齐)
+  whisperx:
+    model: "large-v2"  # Whisper 模型: tiny/base/small/medium/large-v2/large-v3
+                        # large-v2 中文效果最佳; medium 为速度/精度折衷
+    batch_size: 16     # 推理批大小, GPU 显存不足时减小 (8/4)
 
-# --- 音频预处理配置 (新增) ---
+# ============================================================
+# 3.格式审计 + 4.音频归一化 (逐条处理, 写入 temp_dir, 原文件不动)
+#   4a. 格式归一化 + DC偏移消除
+#   4b. 首尾静音修剪
+#   4c. LUFS 响度归一化
+# 缺少 audio: 段时，管道行为与旧版一致 (不执行预处理)
+# ============================================================
 audio:
-  # 格式归一化
-  target_sample_rate: 44100    # 目标采样率 (Hz)
-  target_channels: 1           # 目标声道数 (1=单声道, 2=立体声)
-  target_bit_depth: 16         # 目标位深 (8, 16, 24, 32)
-  input_formats: ["wav", "flac", "mp3", "ogg", "aac", "m4a"]  # 支持的输入格式
-
-  # 首尾静音修剪
-  trim_silence:
-    enable: true
-    top_db: 30                 # 低于此分贝视为"静音"
-    frame_length: 2048         # 分析帧长
-    hop_length: 512            # 帧移
-    min_trim_ms: 100           # 至少切100ms才值得处理
-    keep_padding_ms: 50        # 前后各保留缓冲
-
-  # LUFS 响度归一化
-  loudness:
-    enable: true
-    target_lufs: -16           # 目标响度 (LUFS)，TTS建议-16, SVC建议-18
-    true_peak: -1.5            # True Peak 限制 (dB)
-    lra: 7                     # 响度范围限制 (LU)
-    dual_pass: false           # true=更精确的双pass, false=快速单pass
-
-  # DC偏移消除
-  dc_offset_removal:
-    enable: true               # 顺带在格式归一化中执行
-    threshold: 0.001           # DC偏移大于此值才处理
-
-  # 元数据审计
+  # ── 3.格式审计 ──
+  # 扫描所有输入文件格式元数据，输出 ！格式审计.txt
+  # 在归一化之前执行, 记录原始状态
   audit:
     enable: true               # 生成格式审计报告
+                               # 报告内容: 采样率/位深/声道分布、需转换的文件清单
+                               # 建议首次处理新数据集时开启，确认后可关闭以节省时间
 
-  # 削波检测
+  # ── 4a.格式归一化 ──
+  # 将任意输入格式统一转为 WAV 16-bit PCM，重采样到目标采样率
+  # 通过 ffmpeg 实现: -ar <采样率> -ac <声道> -sample_fmt s16
+  target_sample_rate: 44100    # 目标采样率 (Hz)
+                               # ┌─────────────────┬───────────┐
+                               # │ 框架            │ 采样率     │
+                               # ├─────────────────┼───────────┤
+                               # │ GPT-SoVITS      │ 32000     │
+                               # │ So-VITS-SVC 4.0 │ 44100     │
+                               # │ RVC v2          │ 40000     │
+                               # │ Bert-VITS2      │ 44100     │
+                               # │ CosyVoice       │ 24000     │
+                               # │ Diff-SVC        │ 24000     │
+                               # │ Fish Speech     │ 32000     │
+                               # │ VITS (LJSpeech) │ 22050     │
+                               # └─────────────────┴───────────┘
+                               # TTS=44100 (通用兼容) / 32000 (GPT-SoVITS) / 24000 (CosyVoice)
+                               # SVC=44100 (So-VITS-SVC 标准，保留完整谐波频谱至 22kHz)
+                               # 注意: 修改此项需与目标模型的采样率一致，否则需推理时重采样
+  target_channels: 1           # 目标声道数
+                               # 1 = 单声道 (TTS/SVC 训练数据标准; 所有主流框架均要求单声道)
+                               # 2 = 立体声 (极少数场景，如音乐生成)
+  target_bit_depth: 16         # 目标位深 (bit)
+                               # 16 = PCM 16-bit (所有主流 TTS/SVC 框架的标准: int16, max_wav_value=32768)
+                               # 24/32 = 更高位深 (非训练必须，仅用于高质量存档)
+  input_formats: ["wav", "flac", "mp3", "ogg", "aac", "m4a"]  # 支持的输入格式
+                                                               # 同一 .lab 对应多种格式时，按列表顺序优先选择 (.wav 优先)
+
+  # ── DC 偏移消除 ──
+  # 在格式归一化步骤中附带执行，使用 ffmpeg highpass=f=5 滤波器
+  # 去除 5Hz 以下的直流分量 (人声不可闻但对浮点计算有害)
+  dc_offset_removal:
+    enable: true               # 默认开启，在格式归一化时一并执行
+                               # RVC 使用 48Hz 巴特沃斯高通滤波器 (5 阶) 做类似处理
+                               # 5Hz 高通更温和 (仅去直流)，48Hz 更激进 (也去低频隆隆声)
+    threshold: 0.001           # DC 偏移量 (均值) 大于此值才执行消除
+                               # 0.001 = 0.1% 全量程; 几乎所有录音都有微量 DC 偏移
+                               # 低于此值表示无显著 DC 偏移，跳过以节省处理时间
+
+  # ── 4b.首尾静音修剪 ──
+  # 使用 librosa.effects.trim 检测首尾静音段并裁剪
+  # 修剪后通过 soundfile 写出 (保证采样率无损)
+  trim_silence:
+    enable: true
+    top_db: 30                 # 低于峰值此 dB 值的帧视为"静音" (librosa 默认 60dB)
+                               # ── 判断方法: 相对峰值门限法 (Relative Peak Thresholding) ──
+                               # 1. 按 frame_length/hop_length 分帧，计算每帧 RMS 振幅 (dB)
+                               # 2. 取整段音频的最大帧振幅作为参考 ref (0 dB)
+                               # 3. 每帧振幅 < (ref - top_db) → 判为静音
+                               #    例: top_db=30, 峰值=0dB → 低于 -30dB 的帧为静音
+                               # ── 为什么用相对门限而非绝对门限如 -40 dBFS ──
+                               # 绝对门限: 小声录音 (语音 -35dBFS) 会被误判为静音
+                               # 相对门限: 自动适配每段音频响度, 无论大声/小声都能正确区分
+                               # 局限: 不同录音响度差异大时标准不统一; 本管道先做 LUFS 归一化
+                               #        再修剪静音, 弥补此局限 (归一化后峰值接近, 门限更一致)
+                               # ── 方向 ──
+                               # 值越小 → 越容易判定为静音 → 裁剪更积极 (保留更少弱音)
+                               # 值越大 → 越难判定为静音 → 裁剪更保守 (保留更多弱音)
+                               # TTS=25-30 / SVC=25-28
+                               # So-VITS-SVC-fork 默认: top_db=30
+                               # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB, 约等效 top_db=40
+                               # RVC: threshold=-42dB
+                               # ⚠️ SVC 歌唱需较低值: 过度修剪会切掉尾音衰减、气声和弱音延音
+    frame_length: 2048         # 分析帧长 (采样点数)
+                               # 2048 = 标准值 (约 46ms @44.1kHz, 约 64ms @32kHz)
+                               # librosa.effects.trim 默认值，无需调整
+    hop_length: 512             # 帧移步长 (采样点数)
+                               # 512 = 标准值 (约 11.6ms @44.1kHz)
+                               # 与 STFT 分析和多数 TTS 模型的 hop_size 一致
+    min_trim_ms: 100           # 首尾静音至少多少毫秒才值得修剪
+                               # TTS=100 / SVC=300-500
+                               # 低于此值的静音不处理，避免微小静音导致的过度裁剪
+                               # SVC 需更大值以保护尾音的自然衰减和混响尾声
+    keep_padding_ms: 50        # 修剪后前后各保留的缓冲时长 (毫秒)
+                               # TTS=50 / SVC=300-500
+                               # 防止切得太干净导致起止处的爆音 (click/pop)
+                               # SVC 歌唱需要更多缓冲以保留混响尾声 (~300-800ms)
+                               # openvpi/audio-slicer 默认 max_sil_kept=500ms
+                               # RVC 默认 max_sil_kept=5000ms (5s，较宽裕)
+
+  # ── 4c.LUFS 响度归一化 ──
+  # 基于 EBU R128 标准 (ITU-R BS.1770)，使用 ffmpeg loudnorm 滤波器
+  # 确保数据集内所有音频的感知响度一致
+  loudness:
+    enable: true
+    target_lufs: -16           # 目标响度 (LUFS, 加权分贝)
+                               # ┌──────────────────────────────┬───────────┐
+                               # │ 用途/标准                    │ LUFS      │
+                               # ├──────────────────────────────┼───────────┤
+                               # │ EBU R128 广播标准             │ -23       │
+                               # │ ATSC A/85 美国电视标准        │ -24 LKFS  │
+                               # │ Google Assistant 单声道 TTS   │ -19       │
+                               # │ Google Assistant 立体声 TTS   │ -16       │
+                               # │ AES TD1008 语音内容           │ -18       │
+                               # │ Apple Music Sound Check       │ -16       │
+                               # │ Spotify/YouTube 流媒体         │ -14       │
+                               # │ Netflix (对话门控)            │ -27 LKFS  │
+                               # └──────────────────────────────┴───────────┘
+                               # TTS=-19 (单声道, Google 标准最权威) / -16 (兼容流媒体)
+                               # SVC=-18 (AES 语音标准, 为歌唱动态留出余量)
+                               # 注意: 本项目默认输出单声道 (target_channels=1)
+                               #   单声道权威参考是 -19 LUFS (Google Assistant)
+                               #   -16 是立体声标准，单声道下偏响但可接受
+                               # ⚠️ So-VITS-SVC 默认响应度匹配到 0dBFS，官方明确警告会导致
+                               #   "sonic boom" 并推荐使用 Adobe Audition 替代
+    true_peak: -1.5            # True Peak 限制 (dBTP, 真实峰值)
+                               # ┌──────────────────────┬──────────┐
+                               # │ 标准                 │ dBTP     │
+                               # ├──────────────────────┼──────────┤
+                               # │ EBU R128 广播标准     │ -1.0     │
+                               # │ ITU-R BS.1770-4      │ -1.0     │
+                               # │ Spotify/Apple Music   │ -1.0     │
+                               # │ Amazon Music          │ -2.0     │
+                               # │ Netflix              │ -2.0     │
+                               # │ ffmpeg loudnorm 默认  │ -2.0     │
+                               # └──────────────────────┴──────────┘
+                               # -1.0 = EBU R128 严格标准 (防止帧间采样峰值超 0dBFS)
+                               # -1.5 = 保守折衷 (当前值，在 -1.0 和 ffmpeg 默认 -2.0 之间)
+                               # -2.0 = 最保守 (适合后续经过有损编码的场景)
+                               # 原理: 帧间峰值 (inter-sample peak) 可能超过采样值;
+                               #   有损编码 (AAC/OGG) 会进一步提升峰值
+    lra: 7                     # 响度范围限制 (LU, Loudness Range)
+                               # 定义: EBU Tech 3342 — 10th 到 95th 百分位的响度差值
+                               # ┌──────────────────────┬──────────┐
+                               # │ 类型                 │ LRA (LU) │
+                               # ├──────────────────────┼──────────┤
+                               # │ 有声书/播客           │ 3-6      │
+                               # │ 语音/广播             │ 5-8      │
+                               # │ 流行音乐              │ 5-10     │
+                               # │ 歌唱 (SVC)           │ 7-12     │
+                               # │ 古典音乐/动态大片      │ 10-20    │
+                               # └──────────────────────┴──────────┘
+                               # TTS=5-7 / SVC=8-12
+                               # 注意: EBU R128 不强制 LRA 上限 (描述性指标，非规范性)
+                               #       当 dual_pass=true (linear=true) 时，LRA 参数不生效
+                               #       仅在动态模式 (单 pass) 下 LRA 被用于压缩/扩展
+    dual_pass: True            # 双 pass 模式开关
+                               # false = 单 pass: 快速，ffmpeg 动态估算响度并应用
+                               #         缺点: 使用动态压缩 (dynamic compression) 达标，可能改变语音动态
+                               #         精度: ±0.5-1 LU
+                               # true  = 双 pass: 第 1 pass 仅测量 (输出 JSON)，
+                               #         第 2 pass 用精确测量值 + linear=true 做线性增益
+                               #         优点: 不改变音频动态特征，仅做纯增益调整
+                               #         精度: ±0.1 LU; 速度: 约 2× 编码时间
+                               # TTS/SVC 推荐: true (保留自然动态，避免压缩伪影)
+                               # 参考: https://ffmpeg-cookbook.com/en/articles/loudness-normalization/
+
+  # ── 5.削波检测 ──
+  # 归一化之后执行, 扫描所有样本检测振幅超过阈值的削波 (硬削波/限幅)
+  # 输出 ！削波检测.txt
   clipping_detection:
     enable: true
-    threshold_ratio: 0.01     # 超过1%样本削波才报警
-    clip_threshold: 0.99      # 振幅≥0.99视为削波
+    threshold_ratio: 0.01     # 超过此比例的样本削波才报警 (0.01 = 1%)
+                               # ┌────────────────┬────────────────────────────┐
+                               # │ 削波样本比例    │ 对语音处理的影响            │
+                               # ├────────────────┼────────────────────────────┤
+                               # │ ≤ 0.5%         │ 几乎不可感知                │
+                               # │ ≤ 1% (当前值)  │ 影响极小 (NSF/CMU 研究证实) │
+                               # │ 5%             │ 明显可感知，质量退化        │
+                               # │ 10%            │ 不可接受，文件应废弃        │
+                               # └────────────────┴────────────────────────────┘
+                               # 来源: Harvilla & Stern (2015), NSF/CMU 削波影响研究
+                               #   https://par.nsf.gov/servlets/purl/10298338
+    clip_threshold: 0.99      # 振幅 ≥ 0.99 (即 -0.04 dBFS) 视为削波
+                               # 0 dBFS (1.0)  = 数字硬削波 (满幅)
+                               # 0.99 (当前值) = 保守阈值，捕获接近满幅的预削波
+                               # 0.95          = 严格阈值，也标记近削波信号
+                               # 专业工具参考: Audacity clipfix 默认 95%
 
-  # 静默比例检测
+  # ── 6.质量检测 ──
+  # 归一化之后执行, 检测静默比例和信噪比
+  # 输出 ！质量报告.txt
+
+  # 静默比例检测: 计算音频中静音占整体时长的比例
   silence_ratio:
     enable: true
-    top_db: 30                # 定义静音的阈值
-    warn_threshold: 0.4       # 静默比例>40%警告
-    reject_threshold: 0.7     # 静默比例>70%拒绝
+    top_db: 30                # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
+                               # 用 librosa.effects.split 区分语音帧与静音帧
+                               # 语音帧算信号功率, 静音帧算噪声功率 → 估算静音比例
+    warn_threshold: 0.4       # 静默比例 > 40% 警告
+                               # TTS=0.3-0.4 / SVC=0.4-0.5
+                               # TTS 数据 (干净朗读) 理想静默 <10-20%
+                               # SVC 歌唱有乐句间停顿，30-40% 属正常 (尤其是抒情曲)
+    reject_threshold: 0.7     # 静默比例 > 70% 拒绝
+                               # TTS=0.5-0.7 / SVC=0.6-0.7
+                               # 参考标准: ITU-T P.563 规定语音活动度 <25% (即静默 >75%)
+                               #   时样本质量预测为差; 当前 70% 与该标准一致
+                               # 录音棚 TTS 数据可收紧至 warn=0.25 / reject=0.50
 
-  # VAD-SNR 估计
+  # VAD-SNR 估计: 基于语音活动检测 (VAD) 分离语音/非语音段，估算信噪比
   snr_estimation:
     enable: true
-    top_db: 30                # VAD阈值
-    warn_db: 20               # SNR < 20dB 警告
+    top_db: 30                # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
+                               # 用 librosa.effects.split 分离语音帧与噪声帧
+                               # 语音帧 → 信号功率 p_speech; 噪声帧 → 噪声功率 p_noise
+                               # SNR = 10·log₁₀(p_speech / p_noise)
+    warn_db: 20               # SNR < 20dB 发出警告
+                               # TTS=20 / SVC=15
+                               # ┌────────────────┬───────────────────────┐
+                               # │ SNR 范围        │ 质量                   │
+                               # ├────────────────┼───────────────────────┤
+                               # │ > 40 dB         │ 专业录音棚              │
+                               # │ 30-40 dB        │ 高质量 (推荐标准)       │
+                               # │ 20-30 dB        │ 可接受 (TTS 可用)       │
+                               # │ 15-20 dB        │ 边缘 (需人工检查)       │
+                               # │ < 15 dB         │ 不可接受 (应拒绝)       │
+                               # └────────────────┴───────────────────────┘
     reject_db: 15             # SNR < 15dB 拒绝
+                               # TTS=15 / SVC=10
+                               # ASR 系统通常需要 >30dB; TTS 更宽容; SVC 消费级录音噪声更高
+
+# ============================================================
+# 7.情感分类
+# 将音频按情感分类, 用于训练多情感 TTS/SVC 模型
+# 分类结果影响: 短音频按情感分组合并, 输出按情感分目录
+# ============================================================
+ser:
+  enable: true # 设置为 true 以启用情感识别
+  model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
+  device: "auto" # "cuda", "cpu", "auto"
+
+# ============================================================
+# 8.时长分类与处理
+#   8a. 按时长分为 短/正常/长 三类
+#   8b. 长音频 → 自动切分 (whisperX 对齐 → 静音检测 → ffmpeg 裁剪)
+#   8c. 短音频 → 按情感分组 → 2-3 个一组合并 (ffmpeg concat + 静音间隔)
+# ============================================================
+split_and_merge:
+  short_threshold: 3.0  # 小于等于此值为短音频 (会被合并)
+                         # TTS=3.0 / SVC=3.0-5.0
+                         # 短于 3s 的片段缺少足够的音素多样性，模型难以学习韵律
+  long_threshold: 25.0  # 大于等于此值为长音频 (会被切分)
+                         # TTS=25.0 / SVC=15.0-20.0
+                         # GPT-SoVITS: 25s 上限; So-VITS-SVC: 15s 更安全 (避免 GPU OOM)
+                         # 注意: Whisper/WhisperX 对齐上限 30s
+  merge_silence_duration: 0.3 # 合并短音频时，片段之间插入的静音时长 (秒)
+                               # TTS=0.3 / SVC=0.3-0.5
+                               # GPT-SoVITS 默认片段间隔 0.3s
+                               # SVC 歌唱需要稍多间隔以保留乐句节奏感
+  output_to_split_folder: false # true: 切分文件输出到 "切分后" 子文件夹; false: 和其他文件一起输出
+
+# --- 长音频切分配置 ---
+# 推荐时长范围 (秒):
+#   TTS: GPT-SoVITS 推荐 3-25s
+#        VITS/LJSpeech 数据集 1-10s
+#        F5-TTS 上限 15s
+#   SVC: So-VITS-SVC 推荐 5-15s (官方 README)
+#        RVC 按固定 3.7s 切分 (代码强制4秒一切)
+#        Diff-SVC 24kHz 训练，切片 ~5-10s
+split:
+  # --- 模型与设备 ---
+  device: "auto"              # "cuda", "cpu", "auto" (自动检测 GPU)
+  language: "zh"              # whisperx 使用的语言代码
+                               # "zh" 中文, "en" 英文, "ja" 日文 等
+
+  # --- 切分策略 ---
+  min_duration: 3.0             # 切分后单段最小时长 (秒)
+                                  # TTS=3.0 / SVC=5.0
+                                  # So-VITS-SVC 推荐 5s 起; GPT-SoVITS (openvpi/audio-slicer) 默认 min_length=5s
+                                  # 低于 3s 的片段音素覆盖不足，模型学习效果差
+  max_duration: 25.0            # 切分后单段最大时长 (秒)
+                                  # TTS=25.0 / SVC=15.0
+                                  # GPT-SoVITS: 25s 可用; So-VITS-SVC 官方建议 <15s
+                                  # 超过 15s 在 SVC 训练中可能导致 GPU 显存溢出
+  max_segments: 5               # 单个长音频最多切成几段
+                                  # 限制切分段数避免产生过多碎片
+
+  # --- 静音检测与切分点 ---
+  split_silence_top_db: 40      # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
+                                   # 值越大 → 越难判定为静音 → 切分更保守 (更少切分点)
+                                   # 值越小 → 越易判定为静音 → 切分更积极 (更多切分点)
+                                  # 此参数用于 whisperX 对齐后检测静音区间以确定切分点
+                                  # TTS=35-40 / SVC=30-35
+                                  # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB RMS, 约等效 top_db=40
+                                  # RVC: threshold=-42dB RMS
+                                  # SVC 歌唱需较大值以保留弱音/气声
+  split_min_silence_len_ms: 500 # 最小静音时长 (毫秒), 用于过滤字间/词间短停顿
+                                  # TTS=300-500 / SVC=300-500
+                                  # 低于此值的静音不作为切分点，避免在词间停顿处误切
+  split_offset_from_silence_end_ms: 0 # 在静音区段末尾的偏移量 (毫秒), 负数表示提前切
+                                        # 0: 在静音结束时切分; -100: 提前 100ms 切入语音起始
+                                        # 微调切分点位置以避免切掉后一句的开头
+
+# ============================================================
+# 9.输出
+# ============================================================
+# 是否使用 .lab 文件的内容作为最终输出的音频文件名
+# true:  使用标注文本命名 (例如 "你好世界.wav")
+# false: 保留原始文件名或生成新格式 (例如 "角色名_merge_1.wav")
+use_lab_text_as_filename: false
+
+output:
+  jsonl_output: true # true: 为每个 .list 文件生成对应 .jsonl 格式标注文件
+                     # .list: 路径|文本 格式 (兼容多数 TTS 框架)
+                     # .jsonl: JSON 行格式 (含更多元数据，如情感标签)
