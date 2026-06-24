@@ -66,6 +66,52 @@ def format_hms(total_seconds):
 def format_hms_filename(total_seconds):
     return format_hms(total_seconds).replace(":", "-")
 
+def _sampwidth_to_ffmpeg_codec(sampwidth: int) -> str:
+    """将 WAV sampwidth (字节数) 映射到 ffmpeg PCM 编码器名。
+
+    Args:
+        sampwidth: 每样本字节数 (2=16-bit, 3=24-bit, 4=32-bit float)
+
+    Returns:
+        ffmpeg 编码器名 (如 'pcm_s16le', 'pcm_s24le', 'pcm_f32le')
+
+    Raises:
+        ValueError: 不支持的 sampwidth
+    """
+    mapping = {
+        2: "pcm_s16le",
+        3: "pcm_s24le",
+        4: "pcm_f32le",
+    }
+    codec = mapping.get(sampwidth)
+    if codec is None:
+        raise ValueError(f"不支持的样本宽度: {sampwidth} 字节 (支持: {list(mapping.keys())})")
+    return codec
+
+
+def bit_depth_to_ffmpeg_codec(bit_depth: int) -> tuple[str, str]:
+    """将目标位深映射到 ffmpeg PCM 编码器名和 soundfile subtype 名。
+
+    Args:
+        bit_depth: 位深 (16, 24, 32)
+
+    Returns:
+        (ffmpeg_codec, soundfile_subtype) 元组
+
+    Raises:
+        ValueError: 不支持的位深
+    """
+    mapping = {
+        16: ("pcm_s16le", "PCM_16"),
+        24: ("pcm_s24le", "PCM_24"),
+        32: ("pcm_f32le", "FLOAT"),
+    }
+    entry = mapping.get(bit_depth)
+    if entry is None:
+        raise ValueError(f"不支持的目标位深: {bit_depth} (支持: {list(mapping.keys())})")
+    return entry
+
+
 def read_wav_params_and_frames(path):
     with contextlib.closing(wave.open(path, "rb")) as wf:
         params = wf.getparams()
@@ -88,6 +134,7 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
     base = wav_infos[0]["params"]
     nch = base["nchannels"]
     fr = base["framerate"]
+    codec = _sampwidth_to_ffmpeg_codec(base["sampwidth"])
 
     file_list_lines = []
     tmp_files_to_remove = []
@@ -101,7 +148,7 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", f"anullsrc=channel_layout=mono:sample_rate={fr}",
                 "-t", f"{silence_duration:.3f}",
-                "-ar", str(fr), "-ac", str(nch), "-c:a", "pcm_s16le", silence_path
+                "-ar", str(fr), "-ac", str(nch), "-c:a", codec, silence_path
             ]
             try:
                 subprocess.run(cmd_silence, check=True, timeout=300)
@@ -125,7 +172,7 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "concat", "-safe", "0", "-i", list_path,
-            "-ar", str(fr), "-ac", str(nch), "-c:a", "pcm_s16le", output_path
+            "-ar", str(fr), "-ac", str(nch), "-c:a", codec, output_path
         ]
         try:
             subprocess.run(cmd, check=True, timeout=300)

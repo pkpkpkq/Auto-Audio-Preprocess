@@ -257,11 +257,12 @@ def detect_clipping(input_path: str, config: ValidatorConfig) -> dict:
     threshold_ratio = config.threshold_ratio
     clipped_samples = int(np.sum(np.abs(data) >= clip_threshold))
     total = len(data)
-    clip_percentage = (clipped_samples / total) * 100.0 if total > 0 else 0.0
+    clip_ratio = clipped_samples / total if total > 0 else 0.0
     max_amp = float(np.max(np.abs(data)))
     peak_dbfs = 20.0 * np.log10(max_amp) if max_amp > 0 else -np.inf
+    clip_percentage = clip_ratio * 100.0  # 保留百分比值用于报告显示
     return {
-        "clipped": clip_percentage > threshold_ratio,
+        "clipped": clip_ratio > threshold_ratio,
         "max_amplitude": round(max_amp, 6),
         "clip_percentage": round(clip_percentage, 4),
         "peak_dbfs": round(float(peak_dbfs), 2),

@@ -2,6 +2,8 @@
 
 这是一个用于语音合成（TTS）训练的音频数据集预处理工具。它可以自动化处理、清洗和格式化原始音频和文本标注文件。
 
+> **AI 声明**：本仓库由 AI 辅助生成
+
 ## 主要功能
 
 - **多格式输入支持**: 自动识别 WAV/FLAC/MP3/OGG/AAC/M4A 格式，同文本标注的多格式自动选优。
@@ -11,6 +13,7 @@
 - **首尾静音修剪**: 基于 librosa.effects.trim + soundfile，自动去除首尾静音段，可保留前后缓冲。
 - **DC 偏移消除**: 通过 ffmpeg highpass=f=5 滤波器消除直流偏移。
 - **音频质量审计报告**: 自动生成格式审计（！格式审计.txt）、削波检测（！削波检测.txt）和质量报告（！质量报告.txt，含静默比例与 VAD-SNR 估计）。
+- **情感识别 (SER)**: 支持三种后端：HuBERT (6s 截断, 6类情感)、emotion2vec+ (无硬截断, 9类情感)、SenseVoice (VAD 分块, 7类情感)，通过 `config.yaml` 自由切换。SER 在归一化后执行，长音频切分后每段独立推断。
 - **分类处理**: 根据音频时长，自动将文件分为"短音频"、"正常音频"和"长音频"。
 - **合并短音频**: 将多个短音频自动合并，并在片段之间插入静音，以达到合适的训练时长。
 - **切分长音频**:
@@ -63,6 +66,7 @@ input/
     - `max_duration` / `min_duration`: 切分后单个音频的最大和最小时长。
 - `text`:
     - `replace_map`: 在这里添加您自己的文本替换规则。
+- `ser.backend`: 选择情感识别后端 (`"hubert"`, `"emotion2vec"`, `"sensevoice"`)。
 
 ### 4. 运行程序
 
@@ -156,6 +160,63 @@ audio:
 - `！削波检测.txt` — 各文件削波比例与峰值
 - `！质量报告.txt` — 静默比例与 VAD-SNR 估计结果
 
+### 情感识别配置 (SER)
+
+在 `config.yaml` 中配置情感识别。支持三种后端，通过 `backend` 字段切换：
+
+```yaml
+ser:
+  enable: true                # 启用情感识别
+  backend: "hubert"           # "hubert" | "emotion2vec" | "sensevoice"
+  device: "auto"              # "cuda", "cpu", "auto"
+
+  # SER 失败处理策略
+  # "default":             返回 "unknown" 标签，音频继续流程
+  # "truncate_and_retry":  截断音频到安全时长后重试 (防 OOM)，仅对 emotion2vec 有效
+  # "isolate":             将音频移入 "SER失败/" 子目录，不参与后续流程
+  on_failure: "default"
+
+  hubert:
+    model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
+
+  emotion2vec:
+    model_id: "iic/emotion2vec_plus_large"
+    granularity: "utterance"  # "utterance" | "frame"
+    safe_max_duration: 30     # 截断重试时的安全时长 (秒)
+
+  sensevoice:
+    model_id: "iic/SenseVoiceSmall"
+    language: "auto"           # "zh"|"en"|"yue"|"ja"|"ko"|"auto"
+    use_itn: true
+    ban_emo_unk: false
+    vad_model: "fsmn-vad"
+    vad_max_single_segment_time: 30000  # ms
+```
+
+#### 后端对比
+
+| 后端 | 模型 | 最大输入时长 | 情感类别 | 特点 |
+|------|------|-------------|---------|------|
+| `hubert` | HuBERT-base (CASIA 微调) | 6s (截断) | angry, fear, happy, neutral, sad, surprise (6类) | 轻量，中文优化 |
+| `emotion2vec` | emotion2vec+ large (~300M) | ~30s (显存限制) | angry, disgusted, fearful, happy, neutral, other, sad, surprised, unknown (9类) | 大规模伪标签训练，无硬截断 |
+| `sensevoice` | SenseVoiceSmall (~234M) | 30s (VAD 分块可更长) | happy, sad, angry, neutral, fearful, disgusted, surprised (7类) | 内置 VAD 处理长音频，同时支持 ASR/SER/AED |
+
+#### 管道中的 SER 执行位置
+
+SER 在归一化之后执行，而非扫描阶段。对于长音频，在切分后对每个片段独立推断情感，而非继承整体标签：
+
+1. **归一化后** → 对短音频和正常音频执行 SER → 按情感分组合并
+2. **切分后** → 对每个切分段独立执行 SER → 每段有自己的情感标签
+3. **切分失败** → 根据配置 `on_split_failure` 决定隔离或继续推断
+
+#### 切分失败处理
+
+在 `split_and_merge` 中配置：
+```yaml
+split_and_merge:
+  on_split_failure: "ignore"  # "ignore" (继续跑 SER) | "isolate" (移入切分失败/ 子目录)
+```
+
 ## 输出文件结构
 
 处理完成后，`output` 文件夹的结构如下：
@@ -174,7 +235,13 @@ output/
     ├───！00-25-30.txt    # 处理后音频的总时长标记（文件名即时长）
     ├───Data_merged_1.wav
     ├───audio1.wav
-    └───切分后/
-        ├───audio2_part1.wav
-        └───audio2_part2.wav
+    ├───切分失败/             # 切分失败的长音频（仅 on_split_failure="isolate" 时）
+    ├───SER失败/              # SER 推理失败的音频（仅 ser.on_failure="isolate" 时）
+    ├───切分后/
+    │   ├───audio2_part1.wav
+    │   └───audio2_part2.wav
+    ├───angry/                # 按情感分类的输出目录（动态创建，取决于 SER 后端）
+    ├───neutral/
+    ├───sad/
+    └───...
 ```

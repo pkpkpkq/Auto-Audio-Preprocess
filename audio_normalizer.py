@@ -8,6 +8,7 @@ import subprocess
 import wave
 
 from config_types import NormalizerConfig
+from audio_utils import bit_depth_to_ffmpeg_codec
 
 
 def _format_number(value):
@@ -56,16 +57,32 @@ def normalize_format(input_path, output_path, config: NormalizerConfig):
 
     target_sample_rate = config.target_sample_rate
     target_channels = config.target_channels
+    target_bit_depth = config.target_bit_depth
+
+    ffmpeg_codec, _ = bit_depth_to_ffmpeg_codec(target_bit_depth)
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", input_path,
         "-ar", str(target_sample_rate),
         "-ac", str(target_channels),
-        "-c:a", "pcm_s16le",
+        "-c:a", ffmpeg_codec,
     ]
     if config.dc_offset_removal_enabled:
-        cmd.extend(["-af", "highpass=f=5"])
+        should_remove_dc = True
+        if config.dc_offset_threshold > 0:
+            try:
+                import numpy as np
+                import soundfile as sf
+                data, _ = sf.read(input_path, dtype="float64")
+                if data.ndim > 1:
+                    data = data.mean(axis=1)
+                dc_offset = float(np.mean(data))
+                should_remove_dc = abs(dc_offset) > config.dc_offset_threshold
+            except Exception:
+                pass  # 测量失败时保守执行，避免遗漏
+        if should_remove_dc:
+            cmd.extend(["-af", "highpass=f=5"])
     cmd.append(output_path)
 
     try:
@@ -96,10 +113,12 @@ def trim_silence(input_path, output_path, config: NormalizerConfig):
     top_db = config.trim_top_db
     keep_padding_ms = config.trim_keep_padding_ms
     min_trim_ms = config.trim_min_trim_ms
+    frame_length = config.trim_frame_length
+    hop_length = config.trim_hop_length
 
     try:
         y, sr = librosa.load(input_path, sr=None)
-        _, trim_idx = librosa.effects.trim(y, top_db=top_db)
+        _, trim_idx = librosa.effects.trim(y, top_db=top_db, frame_length=frame_length, hop_length=hop_length)
     except Exception as e:
         raise RuntimeError(f"静音修剪分析失败: {input_path}: {e}") from e
 
@@ -118,7 +137,8 @@ def trim_silence(input_path, output_path, config: NormalizerConfig):
     end = min(input_len, end_idx + padding_samples)
 
     try:
-        sf.write(output_path, y[start:end], sr, subtype="PCM_16")
+        _, sf_subtype = bit_depth_to_ffmpeg_codec(config.target_bit_depth)
+        sf.write(output_path, y[start:end], sr, subtype=sf_subtype)
     except Exception as e:
         raise RuntimeError(f"静音修剪写出失败: {input_path} -> {output_path}: {e}") from e
 

@@ -20,10 +20,16 @@ from config_types import SplitConfig
 
 logger = logging.getLogger(__name__)
 
+# 将 HuggingFace 模型缓存重定向到项目根目录的 local_model/ 下
+_project_dir = os.path.dirname(os.path.abspath(__file__))
+_local_model_dir = os.path.join(_project_dir, "local_model")
+os.environ['HF_HOME'] = _local_model_dir
+
 def split_wav_by_times(src_wav, split_times, outdir, base_name):
     with contextlib.closing(wave.open(src_wav, "rb")) as wf:
         nch = wf.getnchannels()
         fr = wf.getframerate()
+        codec = au._sampwidth_to_ffmpeg_codec(wf.getsampwidth())
     split_times = sorted(split_times or [])
     split_times = [0.0] + split_times + [None]
     out_wav_paths = []
@@ -34,7 +40,7 @@ def split_wav_by_times(src_wav, split_times, outdir, base_name):
         if start and start > 0: cmd += ["-ss", f"{start:.3f}"]
         cmd += ["-i", src_wav]
         if end is not None: cmd += ["-to", f"{end:.3f}"]
-        cmd += ["-ar", str(fr), "-ac", str(nch), "-c:a", "pcm_s16le", out_path]
+        cmd += ["-ar", str(fr), "-ac", str(nch), "-c:a", codec, out_path]
         try:
             subprocess.run(cmd, check=True, timeout=300)
         except subprocess.TimeoutExpired:
@@ -108,6 +114,20 @@ def plan_splits(total_dur: float, silence_spans: list, min_duration: float, max_
              best_plan = best_plan[:-1]
             
     return best_plan
+
+
+def _enforce_max_segments(split_times: list[float], total_dur: float, max_segments: int, logger) -> list[float]:
+    """如果切分段数超过 max_segments, 移除静音最短的切分点直到合规。"""
+    max_cuts = max(0, max_segments - 1)
+    if len(split_times) <= max_cuts:
+        return split_times
+
+    logger.warning(
+        f"智能切分产生 {len(split_times)} 个切分点 ({len(split_times)+1} 段), "
+        f"超出 max_segments={max_segments} 限制, 将移除多余的切分点"
+    )
+    # 从末尾移除切分点 (末尾切分点通常对应较短的尾段)
+    return split_times[:max_cuts]
 
 
 def adjust_punctuation(text_parts: list[str]) -> list[str]:
@@ -240,6 +260,7 @@ class AudioSplitter:
                 if planned_splits is not None:
                     self.logger.info(f"Found best plan with {len(planned_splits)} cuts.")
                     offset_s = self.split_offset_from_silence_end_ms / 1000.0
+                    planned_splits = _enforce_max_segments(planned_splits, total_dur, self.max_segments, self.logger)
                     split_times = [t + offset_s for t in planned_splits]
                     self.logger.info(f"Final split times: {[round(t, 2) for t in split_times]}")
                 else:
@@ -275,6 +296,7 @@ class AudioSplitter:
             # 3. 执行均匀切分
             self.logger.info(f"Fallback: Splitting into {num_segs} equal parts.")
             split_times = [(total_dur / num_segs) * (i + 1) for i in range(num_segs - 1)]
+            split_times = _enforce_max_segments(split_times, total_dur, self.max_segments, self.logger)
             aligned_result = None # 均匀切分时，无法使用之前的对齐结果
 
         base = os.path.splitext(os.path.basename(audio_path))[0]

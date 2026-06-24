@@ -4,7 +4,7 @@ import logging
 import sys
 import difflib
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 # Local module imports
 from asr import transcribe_audio
@@ -13,8 +13,7 @@ from audio_entry import AudioEntry
 import audio_utils as au
 import audio_normalizer as norm
 import audio_validator as val
-from ser import SpeechEmotionRecognizer
-from config_types import NormalizerConfig, ValidatorConfig, SplitConfig, build_normalizer_config, build_validator_config, build_split_config
+from config_types import NormalizerConfig, ValidatorConfig, SplitConfig, SerConfig, build_normalizer_config, build_validator_config, build_split_config, build_ser_config
 
 class DatasetProcessor:
     """封装整个数据集处理流程的类"""
@@ -43,11 +42,10 @@ class DatasetProcessor:
 
         self.asr_config = self.config.get('asr', {})
         
-        self.ser_config = self.config.get('ser', {})
-        self.ser_enabled = self.ser_config.get('enable', False)
+        self._ser_config = build_ser_config(config)
+        self.ser_enabled = self._ser_config.enabled
         self.ser_recognizer = None
-        if self.ser_enabled:
-            self.ser_recognizer = SpeechEmotionRecognizer(self.ser_config)
+        # Lazy init: model loaded on first use
 
         self.audio_config = self.config.get('audio', {})
 
@@ -73,30 +71,77 @@ class DatasetProcessor:
         # self.out_list_path = None # 将被替换为按情感分类的列表
         self.logger = None
 
-    def _extract_asr_for_placeholder(self, asr_segments, prefix, suffix):
+    def _ensure_ser_model(self):
+        if self.ser_enabled and self.ser_recognizer is None:
+            from ser import SpeechEmotionRecognizer
+            self.ser_recognizer = SpeechEmotionRecognizer(self._ser_config)
+
+    def _run_ser_on_entries(self, entries):
+        if not self.ser_enabled or not entries:
+            return
+        self._ensure_ser_model()
+        self.ser_recognizer.predict_emotion_batch(entries)
+
+    def _isolate_entries(self, entries, subfolder_name):
+        if not entries:
+            return
+        isolate_dir = os.path.join(self.output_dir, subfolder_name)
+        os.makedirs(isolate_dir, exist_ok=True)
+        for entry in entries:
+            try:
+                dest = os.path.join(isolate_dir, os.path.basename(entry.path))
+                if os.path.exists(entry.path):
+                    shutil.copy2(entry.path, dest)
+                self.logger.info(f"已隔离: {os.path.basename(entry.path)} → {subfolder_name}/")
+            except Exception as e:
+                self.logger.error(f"隔离文件 {entry.path} 失败: {e}")
+        self.logger.info(f"共隔离 {len(entries)} 个文件到 {subfolder_name}/")
+
+    # ---- CJK + ASCII 标点与空白字符统一正则 ----
+    # norm_to_full_map 构建和 normalize() 必须使用同一套过滤规则，
+    # 否则索引映射与归一化文本不对齐（原 Bug #1）。
+    _PUNCT_WS_RE = re.compile(
+        r'[\s'
+        r'，。！？、'
+        r',.!?…'
+        r'\u201c\u201d\u2018\u2019'
+        r'：;；（）()'
+        r'《》〈〉【】'
+        r'「」『』'
+        r'—～·'
+        r'｛｝'
+        r'\[\]{}'
+        r']'
+    )
+
+    def _extract_asr_for_placeholder(self, asr_segments, prefix, suffix,
+                                     search_start_norm=0):
         """
         基于文本模糊匹配和索引映射的 {ASR} 占位符提取。
+
+        :param asr_segments:      ASR 分段列表，每项含 "text" 键
+        :param prefix:           {ASR} 前方的静态文本
+        :param suffix:           {ASR} 后方的静态文本
+        :param search_start_norm: 规范化文本中的搜索起始索引（多占位符偏移追踪）
+        :return: 提取的文本，或 None 表示匹配失败
         """
         if not asr_segments:
             return None
 
         full_asr_text = "".join(seg["text"] for seg in asr_segments)
 
-        # 1. 创建从规范化文本索引到原始文本索引的映射
+        # 1. 构建从规范文本索引到原始文本索引的映射
+        #    仅保留不被 _PUNCT_WS_RE 匹配的字符，与 normalize() 保持一致
         norm_to_full_map = []
-        norm_char_idx = 0
         for i, char_full in enumerate(full_asr_text):
-            # 只有非标点字符才会计入规范化文本的长度
-            if char_full not in '，。！？、,.!?…“”‘’：;；（）()《》〈〉【】':
-                norm_to_full_map.append(i) # 存储原始文本中的索引
-                norm_char_idx += 1
-        
-        # 2. 规范化所有文本，用于模糊匹配
+            if not self._PUNCT_WS_RE.match(char_full):
+                norm_to_full_map.append(i)
+
+        # 2. 规范化：移除标点 + 空白，用于模糊匹配
         def normalize(s: str) -> str:
             if not s:
                 return ""
-            # 移除所有标点符号和空白字符
-            return re.sub(r'[\s，。！？、,.!?…“”‘’：;；（）()《》〈〉【】]', '', s)
+            return self._PUNCT_WS_RE.sub('', s)
 
         norm_full_asr_text = normalize(full_asr_text)
         norm_prefix = normalize(prefix)
@@ -105,54 +150,73 @@ class DatasetProcessor:
         if not norm_full_asr_text:
             return None
 
-        MIN_MATCH_RATIO = 0.7 # 模糊匹配的最小匹配率阈值
+        MIN_MATCH_RATIO = 0.7  # 模糊匹配的最小匹配率阈值
 
-        # 辅助函数：在规范化文本中查找匹配的起始和结束索引
-        def find_match_indices_in_norm(target_norm, pattern_norm):
+        # 辅助函数：在 target_norm 的 [lo, hi) 范围内查找 pattern 的最佳匹配
+        def find_match_indices_in_norm(target_norm, pattern_norm, lo=0, hi=None):
+            """返回 (norm_start, norm_end) 或 (None, None)"""
             if not pattern_norm:
                 return None, None
-            
+            if hi is None:
+                hi = len(target_norm)
             matcher = difflib.SequenceMatcher(None, target_norm, pattern_norm)
-            match = matcher.find_longest_match(0, len(target_norm), 0, len(pattern_norm))
-            
+            match = matcher.find_longest_match(lo, hi, 0, len(pattern_norm))
+
             if match.size > 0 and (match.size / len(pattern_norm)) >= MIN_MATCH_RATIO:
-                return match.a, match.a + match.size # 返回在规范化文本中的起始和结束索引
+                if match.b != 0 and hasattr(self, 'logger') and self.logger:
+                    self.logger.debug(
+                        f"模糊匹配未锚定到模式起始 (offset={match.b}, "
+                        f"size={match.size}/{len(pattern_norm)})，提取边界可能偏移")
+                return match.a, match.a + match.size
             return None, None
 
         # 3. 在规范化文本上进行模糊匹配
-        prefix_start_norm, prefix_end_norm = find_match_indices_in_norm(norm_full_asr_text, norm_prefix)
-        suffix_start_norm, suffix_end_norm = find_match_indices_in_norm(norm_full_asr_text, norm_suffix)
+        #    prefix：从 search_start_norm 开始搜索
+        pfx_lo = search_start_norm
+        prefix_start_norm, prefix_end_norm = find_match_indices_in_norm(
+            norm_full_asr_text, norm_prefix, lo=pfx_lo)
+
+        #    suffix：必须在 prefix 之后搜索 (Bug #3 修复)
+        sfx_lo = prefix_end_norm if prefix_end_norm is not None else pfx_lo
+        suffix_start_norm, suffix_end_norm = find_match_indices_in_norm(
+            norm_full_asr_text, norm_suffix, lo=sfx_lo)
+
+        # 将 suffix 匹配位置中与 prefix 重叠的部分排除
+        if suffix_start_norm is not None and prefix_end_norm is not None:
+            if suffix_start_norm < prefix_end_norm:
+                # suffix 匹配区域与 prefix 重叠 → 尝试在 prefix 结束后重新搜索
+                suffix_start_norm, suffix_end_norm = find_match_indices_in_norm(
+                    norm_full_asr_text, norm_suffix, lo=prefix_end_norm)
 
         # 4. 将规范化文本的索引映射回原始文本
         start_idx_full = 0
         if prefix_end_norm is not None:
-            # 确保索引在映射范围内
             if prefix_end_norm < len(norm_to_full_map):
                 start_idx_full = norm_to_full_map[prefix_end_norm]
             else:
-                # 如果前缀匹配到规范化文本的末尾或超出，则从原始文本的末尾开始
                 start_idx_full = len(full_asr_text)
 
         end_idx_full = len(full_asr_text)
         if suffix_start_norm is not None:
-            # 确保索引在映射范围内
             if suffix_start_norm < len(norm_to_full_map):
                 end_idx_full = norm_to_full_map[suffix_start_norm]
             else:
-                # 如果后缀匹配到规范化文本的末尾或超出，则到原始文本的末尾
                 end_idx_full = len(full_asr_text)
 
         # 5. 确保索引有效且顺序正确
         if start_idx_full >= end_idx_full:
             return None
 
-        # 6. 从原始文本中提取内容
-        extracted_text = full_asr_text[start_idx_full:end_idx_full].strip()
+        # 6. 从原始文本中提取内容，并去除首尾边界标点 (Bug #8)
+        _BOUNDARY_PUNCT = '，。！？、,.!?…""'':;；（）()《》〈〉【】「」『』—～·\t\n '
+        extracted_text = full_asr_text[start_idx_full:end_idx_full].strip(_BOUNDARY_PUNCT)
         return extracted_text if extracted_text else None
 
     def _process_lab_with_asr(self, lab_path, wav_path):
         """
         支持 {ASR} 占位符的智能替换：仅替换占位符部分，保留上下文。
+        支持同一 lab 中多个 {ASR} 占位符，使用预拆分 + 偏移追踪
+        避免前一个替换结果污染后续占位符的上下文 (Bug #2 修复)。
         """
         with open(lab_path, "r", encoding="utf-8") as f:
             original_lab = f.read().strip()
@@ -167,9 +231,19 @@ class DatasetProcessor:
         if self.logger:
             self.logger.info(f"检测到 {{ASR}} 占位符，对 {wav_path} 执行 ASR...")
 
+        # ===== 多 {ASR} 预拆分 (Bug #2 修复) =====
+        # 1. 按 {ASR} 分割，得到纯静态文本段
+        #    例如 "你好，{ASR}，欢迎来到{ASR}" → ["你好，", "，欢迎来到", ""]
+        parts = temp_lab.split("{ASR}")
+        n_placeholders = len(parts) - 1
+
+        if n_placeholders == 0:
+            # 不应发生（前面已检查 "{ASR}" in temp_lab），但做防御
+            return temp_lab
+
         try:
             segments = transcribe_audio(wav_path, self.asr_config)
-            
+
             if not segments:
                 raise RuntimeError("ASR 未返回任何结果。")
 
@@ -178,24 +252,43 @@ class DatasetProcessor:
             if self.logger:
                 self.logger.info(f"ASR 全文结果: {asr_full_text}")
 
-            final_lab = temp_lab
-            while "{ASR}" in final_lab:
-                parts = final_lab.split("{ASR}", 1)
-                prefix = parts[0]
-                suffix = parts[1] if len(parts) > 1 else ""
+            # 2. 逐个提取，追踪 ASR 文本消耗偏移
+            replacements = []
+            asr_consumed_norm = 0  # 规范化文本中已消耗的字符偏移
 
-                extracted = self._extract_asr_for_placeholder(segments, prefix, suffix)
+            for i in range(n_placeholders):
+                # 每个占位符的上下文：上一段静态文本（prefix）+ 下一段静态文本（suffix）
+                static_prefix = parts[i]
+                static_suffix = parts[i + 1]
+
+                extracted = self._extract_asr_for_placeholder(
+                    segments, static_prefix, static_suffix,
+                    search_start_norm=asr_consumed_norm
+                )
 
                 if extracted is not None:
-                    replacement = extracted
+                    replacements.append(extracted)
                     if self.logger:
-                        self.logger.info(f"成功提取占位符内容: '{extracted}'")
+                        self.logger.info(f"第 {i+1} 个占位符提取成功: '{extracted}'")
+                    # 更新偏移：推算此提取消耗了多少规范化文本
+                    _norm_extracted = self._PUNCT_WS_RE.sub('', extracted)
+                    # 静态 suffix 在 norm 空间中的匹配位置即下一次搜索起点
+                    # 简化策略：累加提取长度 + suffix 估算偏移
+                    norm_suffix = self._PUNCT_WS_RE.sub('', static_suffix)
+                    asr_consumed_norm += len(_norm_extracted) + len(norm_suffix)
                 else:
-                    replacement = "{ASR_FAILED}"
+                    replacements.append("{ASR_FAILED}")
                     if self.logger:
-                        self.logger.warning("无法从 ASR 结果中定位占位符内容，保留失败标记")
+                        self.logger.warning(
+                            f"第 {i+1} 个占位符提取失败，保留失败标记")
 
-                final_lab = prefix + replacement + suffix
+            # 3. 重组：静态段 + 替换结果交替拼接
+            final_parts = []
+            for i, part in enumerate(parts):
+                final_parts.append(part)
+                if i < n_placeholders:
+                    final_parts.append(replacements[i])
+            final_lab = "".join(final_parts)
 
             return final_lab
 
@@ -255,7 +348,7 @@ class DatasetProcessor:
         self.logger.info(f"  - 输出目录: {self.output_dir}")
         self.logger.info(f"  - 切分文件输出到 '切分后' 文件夹: {self.output_to_split_folder}")
         self.logger.info(f"  - 使用标注文本命名: {self.use_lab_text_as_filename}")
-        self.logger.info(f"  - 情感识别 (SER) 已 {'启用' if self.ser_enabled else '禁用'}")
+        self.logger.info(f"  - 情感识别 (SER) 已 {'启用' if self.ser_enabled else '禁用'} (后端: {self._ser_config.backend})")
         self.logger.info(f"  - 替换规则: {self.replace_map}")
         self.logger.info("="*50)
 
@@ -350,6 +443,11 @@ class DatasetProcessor:
                 skipped_rule_count += 1
                 continue
 
+            if "{ASR}" in lab_text or "{ASR_FAILED}" in lab_text:
+                self.logger.warning(f"ASR 占位符未解析，跳过文件: {os.path.basename(wav_path)}")
+                skipped_rule_count += 1
+                continue
+
             # 去重逻辑
             if lab_text in seen_texts:
                 log_line = f"丢弃 (文本内容重复): {os.path.basename(wav_path)}"
@@ -366,10 +464,7 @@ class DatasetProcessor:
                 self.logger.warning(f"获取 {wav_path} 的时长失败: {e}")
                 continue
 
-            emotion = "neutral" # Default emotion
-            if self.ser_enabled:
-                self.logger.info(f"Running SER for {os.path.basename(wav_path)}")
-                emotion = self.ser_recognizer.predict_emotion(wav_path)
+            emotion = "neutral"
 
             matched.append(AudioEntry(
                 path=wav_path,
@@ -553,8 +648,8 @@ class DatasetProcessor:
                 if not wav_infos: continue
 
                 merged_duration = sum(i['duration'] for i in wav_infos)
-                # 新规则：合并后的情感 = 第一个音频的情感
-                result_emotion = wav_infos[0]['emotion']
+                emotion_counts = Counter(w['emotion'] for w in wav_infos)
+                result_emotion = emotion_counts.most_common(1)[0][0]
                 
                 merge_name = f"{self.folder_name}_cross-emotion_merge_{group_idx}_{au.format_hms_filename(merged_duration)}.wav"
                 merge_path = os.path.join(self.auto_merge_dir, merge_name)
@@ -565,7 +660,7 @@ class DatasetProcessor:
                     processed_entries.append(AudioEntry(path=merge_path, lab_text=merge_lab, duration=merged_duration, emotion=result_emotion, origin="merge"))
                     
                     source_files_str = ", ".join([f"{os.path.basename(i['path'])} ({i['emotion']})" for i in wav_infos])
-                    log_msg = f"{os.path.basename(merge_path)} ({result_emotion}) <- [{source_files_str}] (跨情感合并，选用第一个音频的情感)"
+                    log_msg = f"{os.path.basename(merge_path)} ({result_emotion}) <- [{source_files_str}] (跨情感合并，多数投票)"
                     merge_map_lines.append(log_msg)
                     self.logger.info(log_msg)
 
@@ -800,24 +895,38 @@ class DatasetProcessor:
         short_list = [m for m in all_entries if m.duration <= short_threshold]
         normal_list = [m for m in all_entries if short_threshold < m.duration < long_threshold]
         long_list = [m for m in all_entries if m.duration >= long_threshold]
-        
-        final_entries_before_copy = []
-        # 添加正常时长的文件
-        final_entries_before_copy.extend(normal_list)
-        
-        # 处理长音频，同时接收未切分成功和已切分成功的文件
-        unsplit_long_entries, split_entries = self._process_long_files(long_list)
-        
-        # 对未切分成功的长音频，保留原始条目
-        final_entries_before_copy.extend(unsplit_long_entries)
 
-        final_entries_before_copy.extend(split_entries)
-        
-        # 处理短音频
+        # SER(1): 对 short + normal 音频执行情感分类
+        if self.ser_enabled:
+            self._run_ser_on_entries(short_list)
+            self._run_ser_on_entries(normal_list)
+
+        # 合并短音频 (按情感分组)
         processed_short_entries, merge_map_lines = self._process_short_files(short_list)
+
+        # 切分长音频
+        unsplit_long_entries, split_entries = self._process_long_files(long_list)
+
+        # SER(2): 对切分段执行独立情感分类
+        if self.ser_enabled:
+            self._run_ser_on_entries(split_entries)
+
+        # 处理切分失败的长音频
+        if unsplit_long_entries:
+            on_split_failure = self._split_config.on_split_failure
+            if on_split_failure == "isolate":
+                self._isolate_entries(unsplit_long_entries, "切分失败")
+                unsplit_long_entries = []
+            else:  # "ignore" - 保留在流程中, 跑 SER
+                if self.ser_enabled:
+                    self._run_ser_on_entries(unsplit_long_entries)
+
+        final_entries_before_copy = []
+        final_entries_before_copy.extend(normal_list)
+        final_entries_before_copy.extend(unsplit_long_entries)
+        final_entries_before_copy.extend(split_entries)
         final_entries_before_copy.extend(processed_short_entries)
-        
-        # 最终化输出
+
         self._finalize_output(final_entries_before_copy, merge_map_lines, len(all_entries))
         self._cleanup_temp_files()
 

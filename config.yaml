@@ -1,15 +1,11 @@
 # 数据集处理配置
 
 # ============================================================
-# 通用约定:
-#   TTS = 文本转语音（语音合成）训练数据
-#   SVC = 歌声转换（Singing Voice Conversion）训练数据
-#   推荐值格式: TTS=值 / SVC=值
-#
 # 配置项按管道执行顺序排列:
 #   1.输入扫描 → 2.文本处理 → 3.格式审计 → 4.音频归一化
-#   → 5.削波检测 → 6.质量检测 → 7.情感分类 → 8.时长分类与处理
-#   → 9.输出 → 10.清理缓存
+#   → 5.削波检测 → 6.质量检测 → 7.时长分类 → 8.情感分类(SER)
+#   → 9.短音频合并(SER后) → 10.长音频切分 → 11.切分段SER
+#   → 12.输出 → 13.清理缓存
 # ============================================================
 
 # ============================================================
@@ -100,6 +96,7 @@ audio:
                                # ├─────────────────┼───────────┤
                                # │ GPT-SoVITS      │ 32000     │
                                # │ So-VITS-SVC 4.0 │ 44100     │
+                               # │ DDSP            │ 44100     │
                                # │ RVC v2          │ 40000     │
                                # │ Bert-VITS2      │ 44100     │
                                # │ CosyVoice       │ 24000     │
@@ -144,8 +141,9 @@ audio:
                                # ── 为什么用相对门限而非绝对门限如 -40 dBFS ──
                                # 绝对门限: 小声录音 (语音 -35dBFS) 会被误判为静音
                                # 相对门限: 自动适配每段音频响度, 无论大声/小声都能正确区分
-                               # 局限: 不同录音响度差异大时标准不统一; 本管道先做 LUFS 归一化
-                               #        再修剪静音, 弥补此局限 (归一化后峰值接近, 门限更一致)
+                               # 局限: 不同录音响度差异大时标准不统一; 本管道采用
+                               #        先修剪后归一化的顺序, 修剪时各文件响度未统一,
+                               #        但对多数已响度相近的数据集影响极小
                                # ── 方向 ──
                                # 值越小 → 越容易判定为静音 → 裁剪更积极 (保留更少弱音)
                                # 值越大 → 越难判定为静音 → 裁剪更保守 (保留更多弱音)
@@ -153,7 +151,7 @@ audio:
                                # So-VITS-SVC-fork 默认: top_db=30
                                # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB, 约等效 top_db=40
                                # RVC: threshold=-42dB
-                               # ⚠️ SVC 歌唱需较低值: 过度修剪会切掉尾音衰减、气声和弱音延音
+                               # ⚠️ SVC 歌唱需高低值: 过度修剪会切掉尾音衰减、气声和弱音延音
     frame_length: 2048         # 分析帧长 (采样点数)
                                # 2048 = 标准值 (约 46ms @44.1kHz, 约 64ms @32kHz)
                                # librosa.effects.trim 默认值，无需调整
@@ -269,7 +267,7 @@ audio:
     enable: true
     top_db: 30                # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
                                # 用 librosa.effects.split 区分语音帧与静音帧
-                               # 语音帧算信号功率, 静音帧算噪声功率 → 估算静音比例
+                               # 统计语音帧与总样本数的占比 (不涉及功率计算)
     warn_threshold: 0.4       # 静默比例 > 40% 警告
                                # TTS=0.3-0.4 / SVC=0.4-0.5
                                # TTS 数据 (干净朗读) 理想静默 <10-20%
@@ -306,11 +304,43 @@ audio:
 # 7.情感分类
 # 将音频按情感分类, 用于训练多情感 TTS/SVC 模型
 # 分类结果影响: 短音频按情感分组合并, 输出按情感分目录
+#
+# 支持三种后端 (backend):
+#   hubert:       原有 HuBERT 模型, 6s 截断, 6类情感
+#   emotion2vec:  emotion2vec+ large, 无硬截断(推荐≤30s), 9类情感
+#   sensevoice:   SenseVoiceSmall, VAD分块处理>30s, 7类情感
+#
+# SER 在归一化后执行, 长音频切分后每个片段独立推断
 # ============================================================
 ser:
-  enable: true # 设置为 true 以启用情感识别
-  model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
-  device: "auto" # "cuda", "cpu", "auto"
+  enable: true
+  backend: "hubert"    # "hubert" | "emotion2vec" | "sensevoice"
+  device: "auto"       # "cuda", "cpu", "auto"
+
+  # SER 失败处理策略
+  # "default":             返回 "unknown" 标签, 音频继续流程
+  # "truncate_and_retry":  截断音频到安全时长后重试 (防OOM), 仅对 emotion2vec 有效
+  # "isolate":             将音频移入 "SER失败/" 子目录, 不参与后续流程
+  on_failure: "default"
+
+  # --- HuBERT 后端 ---
+  hubert:
+    model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
+
+  # --- emotion2vec 后端 ---
+  emotion2vec:
+    model_id: "emotion2vec/emotion2vec_plus_large"
+    granularity: "utterance"  # "utterance" | "frame"
+    safe_max_duration: 30     # truncate_and_retry 时的安全截断时长 (秒)
+
+  # --- SenseVoice 后端 ---
+  sensevoice:
+    model_id: "FunAudioLLM/SenseVoiceSmall"
+    language: "auto"           # "zh"|"en"|"yue"|"ja"|"ko"|"auto"
+    use_itn: true
+    ban_emo_unk: false
+    vad_model: "fsmn-vad"
+    vad_max_single_segment_time: 30000  # ms
 
 # ============================================================
 # 8.时长分类与处理
@@ -327,10 +357,14 @@ split_and_merge:
                          # GPT-SoVITS: 25s 上限; So-VITS-SVC: 15s 更安全 (避免 GPU OOM)
                          # 注意: Whisper/WhisperX 对齐上限 30s
   merge_silence_duration: 0.3 # 合并短音频时，片段之间插入的静音时长 (秒)
-                               # TTS=0.3 / SVC=0.3-0.5
-                               # GPT-SoVITS 默认片段间隔 0.3s
-                               # SVC 歌唱需要稍多间隔以保留乐句节奏感
+                                # TTS=0.3 / SVC=0.3-0.5
+                                # GPT-SoVITS 默认片段间隔 0.3s
+                                # SVC 歌唱需要稍多间隔以保留乐句节奏感
   output_to_split_folder: false # true: 切分文件输出到 "切分后" 子文件夹; false: 和其他文件一起输出
+  # 切分失败处理策略
+  # "ignore":  保留在流程中, 继续对其跑 SER
+  # "isolate": 将切分失败的长音频移入 "切分失败/" 子目录, 不参与后续流程
+  on_split_failure: "ignore"
 
 # --- 长音频切分配置 ---
 # 推荐时长范围 (秒):

@@ -59,6 +59,28 @@ class ValidatorConfig:
 
 
 @dataclass
+class SerConfig:
+    """Config for SER (Speech Emotion Recognition) module."""
+    enabled: bool = False
+    backend: str = "hubert"  # "hubert" | "emotion2vec" | "sensevoice"
+    device: str = "auto"
+    on_failure: str = "default"  # "default" | "truncate_and_retry" | "isolate"
+
+    hubert_model_id: str = "xmj2002/hubert-base-ch-speech-emotion-recognition"
+
+    emotion2vec_model_id: str = "iic/emotion2vec_plus_large"
+    emotion2vec_granularity: str = "utterance"  # "utterance" | "frame"
+    emotion2vec_safe_max_duration: float = 30.0  # seconds
+
+    sensevoice_model_id: str = "iic/SenseVoiceSmall"
+    sensevoice_language: str = "auto"  # "zh"|"en"|"yue"|"ja"|"ko"|"auto"
+    sensevoice_use_itn: bool = True
+    sensevoice_ban_emo_unk: bool = False
+    sensevoice_vad_model: str = "fsmn-vad"
+    sensevoice_vad_max_single_segment_time: int = 30000  # ms
+
+
+@dataclass
 class SplitConfig:
     """Config for AudioSplitter."""
     device: str = "auto"
@@ -70,6 +92,7 @@ class SplitConfig:
     split_offset_from_silence_end_ms: int = 0
     split_silence_top_db: int = 40
     merge_silence_duration: float = 0.3
+    on_split_failure: str = "ignore"  # "isolate" | "ignore"
 
 
 def build_normalizer_config(raw_config: dict) -> NormalizerConfig:
@@ -141,4 +164,27 @@ def build_split_config(raw_config: dict) -> SplitConfig:
         split_offset_from_silence_end_ms=int(split.get("split_offset_from_silence_end_ms", 0)),
         split_silence_top_db=int(split.get("split_silence_top_db", 40)),
         merge_silence_duration=float(sam.get("merge_silence_duration", 0.3)),
+        on_split_failure=sam.get("on_split_failure", "ignore"),
+    )
+
+
+def build_ser_config(raw_config: dict) -> SerConfig:
+    ser = raw_config.get("ser", {})
+    if not ser:
+        return SerConfig()
+    return SerConfig(
+        enabled=ser.get("enable", False),
+        backend=ser.get("backend", "hubert"),
+        device=ser.get("device", "auto"),
+        on_failure=ser.get("on_failure", "default"),
+        hubert_model_id=ser.get("hubert", {}).get("model_id", "xmj2002/hubert-base-ch-speech-emotion-recognition"),
+        emotion2vec_model_id=ser.get("emotion2vec", {}).get("model_id", "iic/emotion2vec_plus_large"),
+        emotion2vec_granularity=ser.get("emotion2vec", {}).get("granularity", "utterance"),
+        emotion2vec_safe_max_duration=float(ser.get("emotion2vec", {}).get("safe_max_duration", 30.0)),
+        sensevoice_model_id=ser.get("sensevoice", {}).get("model_id", "iic/SenseVoiceSmall"),
+        sensevoice_language=ser.get("sensevoice", {}).get("language", "auto"),
+        sensevoice_use_itn=ser.get("sensevoice", {}).get("use_itn", True),
+        sensevoice_ban_emo_unk=ser.get("sensevoice", {}).get("ban_emo_unk", False),
+        sensevoice_vad_model=ser.get("sensevoice", {}).get("vad_model", "fsmn-vad"),
+        sensevoice_vad_max_single_segment_time=int(ser.get("sensevoice", {}).get("vad_max_single_segment_time", 30000)),
     )
