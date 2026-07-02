@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import os
 import sys
 import wave
@@ -11,22 +10,26 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 from audio_normalizer import trim_silence  # noqa: E402
-from config_types import build_normalizer_config  # noqa: E402
+from config_types import NormalizerConfig  # noqa: E402
 
 
 EVIDENCE_DIR = os.path.join(REPO_ROOT, ".sisyphus", "evidence")
 
 
 def _trim_config(test_config, *, top_db=30, min_trim_ms=100, keep_padding_ms=50):
-    cfg = copy.deepcopy(test_config)
-    cfg["audio"]["trim_silence"].update(
-        {
-            "top_db": top_db,
-            "min_trim_ms": min_trim_ms,
-            "keep_padding_ms": keep_padding_ms,
-        }
+    base = test_config.normalizer
+    return NormalizerConfig(
+        target_sample_rate=base.target_sample_rate, target_channels=base.target_channels,
+        target_bit_depth=base.target_bit_depth, input_formats=base.input_formats,
+        trim_enabled=base.trim_enabled, trim_top_db=top_db,
+        trim_frame_length=base.trim_frame_length, trim_hop_length=base.trim_hop_length,
+        trim_min_trim_ms=min_trim_ms, trim_keep_padding_ms=keep_padding_ms,
+        loudness_enabled=base.loudness_enabled, loudness_target_lufs=base.loudness_target_lufs,
+        loudness_true_peak=base.loudness_true_peak, loudness_lra=base.loudness_lra,
+        loudness_dual_pass=base.loudness_dual_pass,
+        dc_offset_removal_enabled=base.dc_offset_removal_enabled,
+        dc_offset_threshold=base.dc_offset_threshold,
     )
-    return build_normalizer_config(cfg)
 
 
 def _duration(path):

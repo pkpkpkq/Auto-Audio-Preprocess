@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import os
 import sys
 import wave
@@ -14,16 +13,22 @@ sys.path.insert(0, REPO_ROOT)
 
 from audio_normalizer import needs_normalization, normalize_format  # noqa: E402
 from audio_utils import get_audio_duration_seconds as get_audio_duration_any  # noqa: E402
-from config_types import NormalizerConfig, build_normalizer_config  # noqa: E402
+from config_types import NormalizerConfig  # noqa: E402
 
 
 def _audio_config(test_config, *, sample_rate=44100, channels=1, bit_depth=16, dc_offset=False):
-    cfg = copy.deepcopy(test_config)
-    cfg["audio"]["target_sample_rate"] = sample_rate
-    cfg["audio"]["target_channels"] = channels
-    cfg["audio"]["target_bit_depth"] = bit_depth
-    cfg["audio"]["dc_offset_removal"]["enable"] = dc_offset
-    return build_normalizer_config(cfg)
+    base = test_config.normalizer
+    return NormalizerConfig(
+        target_sample_rate=sample_rate, target_channels=channels, target_bit_depth=bit_depth,
+        input_formats=base.input_formats,
+        trim_enabled=base.trim_enabled, trim_top_db=base.trim_top_db,
+        trim_frame_length=base.trim_frame_length, trim_hop_length=base.trim_hop_length,
+        trim_min_trim_ms=base.trim_min_trim_ms, trim_keep_padding_ms=base.trim_keep_padding_ms,
+        loudness_enabled=base.loudness_enabled, loudness_target_lufs=base.loudness_target_lufs,
+        loudness_true_peak=base.loudness_true_peak, loudness_lra=base.loudness_lra,
+        loudness_dual_pass=base.loudness_dual_pass,
+        dc_offset_removal_enabled=dc_offset, dc_offset_threshold=base.dc_offset_threshold,
+    )
 
 
 def _wav_params(path):

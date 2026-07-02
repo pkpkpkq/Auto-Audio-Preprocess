@@ -1,0 +1,32 @@
+[project]
+name = "audiopreprocess"
+version = "0.1.0"
+description = "TTS audio dataset preprocessing pipeline"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "funasr",
+    "librosa",
+    "numpy",
+    "opencc-python-reimplemented",
+    "pyyaml",
+    "soundfile",
+    "torch",
+    "transformers",
+    "whisperx",
+    # whisperx 运行时加载 pyannote.audio，需 ≥4.0 以兼容当前 torchaudio
+    "pyannote-audio>=4.0.0",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu126"

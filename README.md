@@ -1,247 +1,302 @@
 # 音频预处理工具 (Audio Preprocessing Tool for TTS)
 
-这是一个用于语音合成（TTS）训练的音频数据集预处理工具。它可以自动化处理、清洗和格式化原始音频和文本标注文件。
+这是一个用于语音合成（TTS）训练的音频数据集预处理工具。它可以自动化处理、清洗和格式化原始音频和文本标注文件，帮助您快速构建高质量的训练数据集。
 
 > **AI 声明**：本仓库由 AI 辅助生成
 
-## 主要功能
+---
 
-- **多格式输入支持**: 自动识别 WAV/FLAC/MP3/OGG/AAC/M4A 格式，同文本标注的多格式自动选优。
-- **音频格式归一化**: 将任意支持格式统一转为 WAV 16-bit PCM，可配置目标采样率（默认 44100Hz）、声道数、位深。
-- **重采样**: 基于 ffmpeg 将输入音频重采样到目标采样率。
-- **LUFS 响度归一化**: 基于 EBU R128 标准（ffmpeg loudnorm），默认目标 -16 LUFS，可配置 True Peak、响度范围、单/双 pass。
-- **首尾静音修剪**: 基于 librosa.effects.trim + soundfile，自动去除首尾静音段，可保留前后缓冲。
-- **DC 偏移消除**: 通过 ffmpeg highpass=f=5 滤波器消除直流偏移。
-- **音频质量审计报告**: 自动生成格式审计（！格式审计.txt）、削波检测（！削波检测.txt）和质量报告（！质量报告.txt，含静默比例与 VAD-SNR 估计）。
-- **情感识别 (SER)**: 支持三种后端：HuBERT (6s 截断, 6类情感)、emotion2vec+ (无硬截断, 9类情感)、SenseVoice (VAD 分块, 7类情感)，通过 `config.yaml` 自由切换。SER 在归一化后执行，长音频切分后每段独立推断。
-- **分类处理**: 根据音频时长，自动将文件分为"短音频"、"正常音频"和"长音频"。
-- **合并短音频**: 将多个短音频自动合并，并在片段之间插入静音，以达到合适的训练时长。
-- **切分长音频**:
-    - 基于静音检测找到最佳切分点，使用 `whisperx` 进行语音对齐，以实现自动标注文本切分。
-    - 自动调整标点符号，将切分后位于句首的标点符号移动到上一句的句尾。
-- **文本规范化**:
-    - 可在 `config.yaml` 中自定义灵活的**文本替换规则**，用于清理或规范化标注文本。
-    - `{SKIP}` 规则，用于跳过不需要处理的音频文件。
-- **去除重复内容**: 自动检测并移除具有重复标注文本的音频文件，避免数据冗余。
-- **配置**: 所有关键参数均可通过 `config.yaml` 文件进行配置。
-- **输出结构**:
-    - 生成结构化的输出目录，包含处理好的音频文件。
-    - 生成详细的**合并、切分和去重记录**，方便溯源。
-    - 自动生成一个 `.list` 标注文件。
+## 1. 简介与工作流设计 (Workflow Overview)
 
-## 如何使用
+本工具采用阶段驱动（Stage-driven）的设计，将音频元数据审计、格式归一化、质量检测、时长分类、短音频合并、长音频切分及情感分类（SER）串联成一条自动流水线。
 
-### 1. 安装依赖
+```mermaid
+graph TD
+    A[输入扫描: 音频 + .lab 配对] --> B["[Stage: after_scan]"]
+    B --> C["音频归一化 (Normalize) <br> 格式/高通去直流/静音修剪/LUFS响度"]
+    C --> D["[Stage: after_normalize]"]
+    D --> E[时长分类: 短/正常/长]
+    E --> F["[Stage: after_classify]"]
+    F --> G{分类处理}
+    G -->|短音频 <= short_threshold| H["SER情感分类(1) <br>按情感分组合并"]
+    G -->|正常音频| I["SER情感分类(1)"]
+    G -->|长音频 >= long_threshold| J["WhisperX 对齐 + 动规静音切分"]
+    H --> K["[Stage: after_merge]"]
+    J --> L["切分片段 SER情感分类(2)"]
+    I --> M[合并所有正常/合并/切分条目]
+    K --> M
+    L --> M
+    M --> N["[Stage: final] <br>最终检查"]
+    N --> O["输出归档: .list + .jsonl 标注 <br>以及按情感动态分类的音频文件"]
+```
 
-在开始之前，请确保您已安装 Python和ffmpeg。然后，通过以下命令安装所有必需的库：
+---
+
+## 2. 系统准备与安装 (Prerequisites & Installation)
+
+### 外部依赖
+* **Python**: 推荐 Python 3.8 - 3.12 版本。
+* **FFmpeg**: 必须安装 FFmpeg 并确保其可执行文件路径已添加到系统的 `PATH` 环境变量中。程序将调用 `ffmpeg` 和 `ffprobe` 执行音频转换和响度分析。
+
+### 依赖安装
+推荐使用 `uv` 极速安装，或使用传统 `pip` 方式：
 
 ```bash
+# 使用 uv 运行（推荐）
+uv venv
+uv pip install -r requirements.txt
+
+# 或使用 pip 安装依赖
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-### 2. 准备数据
+### 模型缓存
+所有模型（FunASR、WhisperX、HuBERT、emotion2vec、SenseVoice 等）在首次运行时会自动下载，统一缓存于项目根目录下的 `local_model/` 文件夹中。
 
-将您的原始 `.wav` 音频文件和对应的 `.lab` 文本标注文件放入一个文件夹中。例如：
+---
 
+## 3. 快速上手 (Quick Start)
+
+### Step 1: 准备数据
+将原始音频文件（支持 `WAV/FLAC/MP3/OGG/AAC/M4A` 格式）和对应的 `.lab` 文本标注文件放入一个文件夹中。支持多层嵌套子文件夹。
+例如：
 ```
 input/
 └───Data/
     ├───audio1.wav
     ├───audio1.lab
-    ├───audio2.wav
+    ├───audio2.flac
     ├───audio2.lab
     └───...
 ```
 
-### 3. 配置 `config.yaml`
-
-打开 `config.yaml` 文件，根据您的需求修改以下核心参数：
-
-- `root_dir`: 设置为您存放原始数据的文件夹路径（例如 `D:\data\hutao`）。
-- `recursive`: 如果您的数据分布在多个子文件夹中，请设置为 `true`。
-- `split_and_merge`:
-    - `short_threshold`: 小于此时长（秒）的音频将被视为**短音频**并进行合并。
-    - `long_threshold`: 大于此时长（秒）的音频将被视为**长音频**并进行切分。
-- `split`:
-    - `max_duration` / `min_duration`: 切分后单个音频的最大和最小时长。
-- `text`:
-    - `replace_map`: 在这里添加您自己的文本替换规则。
-- `ser.backend`: 选择情感识别后端 (`"hubert"`, `"emotion2vec"`, `"sensevoice"`)。
-
-### 4. 运行程序
-
-配置完成后，直接运行主程序即可：
-
-```bash
-python main.py
+### Step 2: 配置 `config.yaml`
+在根目录下打开 `config.yaml`。确保修改了以下核心路径与参数：
+```yaml
+root_dir: './input'   # 输入数据文件夹路径
+recursive: true       # 是否递归处理子目录
 ```
 
-程序将开始处理，并在 `output` 文件夹中生成结果。
+### Step 3: 运行预处理
+在根目录下直接执行：
+```bash
+python main.py
+# 或使用 uv 执行
+uv run main.py
+```
+程序运行后，会依次在命令行和日志文件中输出每个阶段的执行情况。处理后的最终产物将输出在 `output` 文件夹中。
 
-## 音频预处理配置（新增）
+---
 
-在 `config.yaml` 中新增 `audio:` 配置段，控制所有音频预处理行为。缺少此配置段时，管道行为与旧版一致。
+## 4. 核心配置详解 (Configuration Guide)
 
-### 格式归一化
+### 4.1 检查流水线 (`checks:`)
+这是控制数据清洗和剔除逻辑的核心板块。支持的检查项包括格式审计 (`audit`)、削波检测 (`clipping`)、静默比例 (`silence_ratio`) 以及信噪比评估 (`snr`)。
+
+```yaml
+checks:
+  audit:
+    enable: true
+    run_at: ["after_scan", "final"]    # 执行阶段
+    target_sample_rate: 44100
+    target_channels: 1
+    target_bit_depth: 16
+  clipping:
+    enable: true
+    run_at: ["after_normalize", "final"]
+    reject_action: "isolate"           # 超标处理方式: warn_only (仅警告) | isolate (隔离) | remove (移除)
+    clip_threshold: 0.99               # 振幅门限 (0.99 即 -0.08 dBFS 判定为削波)
+    warn_threshold: 0.01               # 削波样本比例 > 1% 警告
+    reject_threshold: 0.05             # 削波样本比例 > 5% 拒绝 (仅在 run_at 的最后一个阶段生效)
+  silence_ratio:
+    enable: true
+    run_at: ["after_normalize", "final"]
+    reject_action: "isolate"
+    top_db: 30                         # 低于峰值此 dB 判定为静音
+    warn_threshold: 0.4                # 静默比例 > 40% 警告
+    reject_threshold: 0.7              # 静默比例 > 70% 拒绝
+  snr:
+    enable: true
+    run_at: ["after_normalize", "final"]
+    reject_action: "isolate"
+    top_db: 30                         # 用于 VAD 的语音与噪声分离门限
+    warn_db: 20                        # 信噪比 < 20dB 警告
+    reject_db: 15                      # 信噪比 < 15dB 拒绝
+```
+
+### 4.2 音频归一化 (`audio:`)
+控制音频的重采样、声道合并、位深归一化、首尾静音切除以及 LUFS 感知响度归一化。
+> **注意**：如果配置文件中缺失整个 `audio:` 配置段，程序将不执行任何音频修改（退化为旧版的只读/纯分析模式）。
 
 ```yaml
 audio:
-  target_sample_rate: 44100    # 目标采样率 (Hz)
-  target_channels: 1           # 目标声道数 (1=单声道, 2=立体声)
-  target_bit_depth: 16         # 目标位深
-  input_formats: ["wav", "flac", "mp3", "ogg", "aac", "m4a"]  # 支持的输入格式
-```
+  target_sample_rate: 44100   # 目标采样率 (Hz)
+  target_channels: 1          # 目标声道数 (TTS/SVC 训练推荐 1 单声道)
+  target_bit_depth: 16        # 目标位深 (16-bit PCM WAV)
+  input_formats: ["wav", "flac", "mp3", "ogg", "aac", "m4a"] # 多格式支持与优先级
 
-- 自动检测输入格式，通过 ffmpeg 转为 WAV 16-bit PCM。
-- 同一 .lab 对应多种音频格式时，按优先级选择（.wav 优先）。
-
-### DC 偏移消除
-
-```yaml
+  # 直流偏移消除
   dc_offset_removal:
     enable: true
-    threshold: 0.001           # DC偏移大于此值才处理
-```
+    threshold: 0.001          # 直流分量均值大于此值才消除，使用 ffmpeg highpass=f=5
 
-- 在格式归一化时附带执行，使用 ffmpeg `highpass=f=5` 滤波器。
-
-### 首尾静音修剪
-
-```yaml
+  # 首尾静音修剪
   trim_silence:
     enable: true
-    top_db: 30                 # 低于此分贝视为"静音"
+    top_db: 30                # 相对峰值的静音门限 (dB)
     frame_length: 2048
     hop_length: 512
-    min_trim_ms: 100           # 至少切100ms才值得处理
-    keep_padding_ms: 50        # 前后各保留缓冲
-```
+    min_trim_ms: 100          # 至少修剪 100ms 才处理
+    keep_padding_ms: 50       # 修剪后前后保留的静音缓冲时长，防止爆音 (SVC 建议调大)
 
-- 基于 librosa.effects.trim 检测，soundfile 写出。
-- 修剪量低于 `min_trim_ms` 时不处理，前后保留 `keep_padding_ms` 缓冲。
-
-### LUFS 响度归一化
-
-```yaml
+  # LUFS 响度归一化
   loudness:
     enable: true
-    target_lufs: -16           # TTS建议-16, SVC建议-18
-    true_peak: -1.5            # True Peak 限制 (dB)
-    lra: 7                     # 响度范围限制 (LU)
-    dual_pass: false           # true=更精确的双pass, false=快速单pass
+    target_lufs: -16          # 目标感知响度 (TTS 建议 -16 到 -19; SVC 建议 -18 以保留动态)
+    true_peak: -1.5           # 真实峰值限制 (dBTP)
+    lra: 7                    # 响度范围 (LU)
+    dual_pass: true           # 双 pass 模式。true: 精确线性增益控制；false: 快速单pass动态压缩。
 ```
 
-- 基于 EBU R128 标准，使用 ffmpeg loudnorm 滤波器。
-- 双 pass 模式更精确但耗时翻倍。
+### 4.3 文本清洗与 ASR (`text:` 和 `asr:`)
+* **文本繁简转换与正则替换**：在扫描阶段，将繁体字统一转换为简体字，并执行 `replace_map` 中配置的文本清理。
+* **特殊占位符支持**：
+  * `{SKIP}`: 包含此占位符的条目（如 lab 中包含该标记）将被完全跳过，不录入流水线。
+  * `{ASR}`: 将使用 FunASR 识别结果自动填充该占位符。
+```yaml
+text:
+  t2s: true
+  replace_map:
+    "「": ""
+    "」": ""
+    "{NICKNAME}": "{SKIP}"     # 丢弃该音频
+    "{PLAYER_NAME}": "{ASR}"   # 自动转写并填充该位置
 
-### 音频质量审计报告
+asr:
+  language: "zh"
+  funasr:
+    model: "paraformer-zh"     # 中文 ASR 推荐
+    use_vad: false
+  whisperx:
+    model: "large-v2"          # WhisperX 强制对齐用模型
+    batch_size: 16
+```
+
+### 4.4 时长分类与切分合并 (`split_and_merge:` 和 `split:`)
+* **短音频合并**：音频时长 $\le$ `short_threshold` 的条目被判定为短音频，会按情感分组并拼接（片段间填充 `merge_silence_duration` 秒的静音）。
+* **长音频切分**：音频时长 $\ge$ `long_threshold` 的条目被判定为长音频，会利用 `whisperx` 词级对齐、动规寻找最长静音停顿处作为切分点，并自动纠正句首标点符号（将其移至上一句句尾）。
+* **切分失败策略**：`on_split_failure` 控制无法成功切分的音频是隔离 (`isolate`) 还是忽略并继续 (`ignore`)。
 
 ```yaml
-  audit:
-    enable: true               # 生成格式审计报告 → ！格式审计.txt
-  clipping_detection:
-    enable: true
-    threshold_ratio: 0.01      # 超1%样本削波才报警
-    clip_threshold: 0.99       # 振幅≥0.99视为削波
-  silence_ratio:
-    enable: true
-    top_db: 30
-    warn_threshold: 0.4        # 静默>40%警告
-    reject_threshold: 0.7      # 静默>70%拒绝
-  snr_estimation:
-    enable: true
-    top_db: 30
-    warn_db: 20                # SNR<20dB警告
-    reject_db: 15              # SNR<15dB拒绝
+split_and_merge:
+  short_threshold: 3.0
+  long_threshold: 25.0
+  merge_silence_duration: 0.3
+  output_to_split_folder: false # 切分后的音频是否单独放入"切分后/"文件夹
+  on_split_failure: "ignore"
+
+split:
+  device: "auto"
+  language: "zh"
+  min_duration: 3.0             # 切分后片段最小时长
+  max_duration: 25.0            # 切分后片段最大时长
+  max_segments: 5               # 单个长音频最大切分段数
+  split_silence_top_db: 40      # 切分点判定相对门限
+  split_min_silence_len_ms: 500 # 判定为切分点的最小静音时长
+  split_offset_from_silence_end_ms: 0
 ```
 
-生成的报告文件：
-- `！格式审计.txt` — 采样率/位深/声道分布，需转换的文件清单
-- `！削波检测.txt` — 各文件削波比例与峰值
-- `！质量报告.txt` — 静默比例与 VAD-SNR 估计结果
-
-### 情感识别配置 (SER)
-
-在 `config.yaml` 中配置情感识别。支持三种后端，通过 `backend` 字段切换：
+### 4.5 情感识别后端 (`ser:`)
+支持 3 种情绪分类模型作为后端，用于在归一化后对短/正常音频做第一阶段 SER（指导短音频合并），以及在切分后做第二阶段 SER（得到切分段的独立情绪标签）。
 
 ```yaml
 ser:
-  enable: true                # 启用情感识别
-  backend: "hubert"           # "hubert" | "emotion2vec" | "sensevoice"
-  device: "auto"              # "cuda", "cpu", "auto"
-
-  # SER 失败处理策略
-  # "default":             返回 "unknown" 标签，音频继续流程
-  # "truncate_and_retry":  截断音频到安全时长后重试 (防 OOM)，仅对 emotion2vec 有效
-  # "isolate":             将音频移入 "SER失败/" 子目录，不参与后续流程
-  on_failure: "default"
-
-  hubert:
-    model_id: "xmj2002/hubert-base-ch-speech-emotion-recognition"
-
-  emotion2vec:
-    model_id: "iic/emotion2vec_plus_large"
-    granularity: "utterance"  # "utterance" | "frame"
-    safe_max_duration: 30     # 截断重试时的安全时长 (秒)
-
-  sensevoice:
-    model_id: "iic/SenseVoiceSmall"
-    language: "auto"           # "zh"|"en"|"yue"|"ja"|"ko"|"auto"
-    use_itn: true
-    ban_emo_unk: false
-    vad_model: "fsmn-vad"
-    vad_max_single_segment_time: 30000  # ms
+  enable: true
+  backend: "hubert"             # 后端切换: hubert | emotion2vec | sensevoice
+  device: "auto"
+  on_failure: "default"         # 推理失败策略: default (转unknown) | truncate_and_retry (截断重试) | isolate (隔离)
 ```
 
-#### 后端对比
+#### SER 后端能力对比
 
-| 后端 | 模型 | 最大输入时长 | 情感类别 | 特点 |
-|------|------|-------------|---------|------|
-| `hubert` | HuBERT-base (CASIA 微调) | 6s (截断) | angry, fear, happy, neutral, sad, surprise (6类) | 轻量，中文优化 |
-| `emotion2vec` | emotion2vec+ large (~300M) | ~30s (显存限制) | angry, disgusted, fearful, happy, neutral, other, sad, surprised, unknown (9类) | 大规模伪标签训练，无硬截断 |
-| `sensevoice` | SenseVoiceSmall (~234M) | 30s (VAD 分块可更长) | happy, sad, angry, neutral, fearful, disgusted, surprised (7类) | 内置 VAD 处理长音频，同时支持 ASR/SER/AED |
+| 后端名称 | 核心模型 | 最大输入时长 | 情感分类数量 | 特点与局限 |
+| :--- | :--- | :--- | :--- | :--- |
+| **`hubert`** | `hubert-base-ch-speech-emotion-recognition` | 6s (超时硬截断) | 6 类 | 中文优化好，适合短音频 |
+| **`emotion2vec`** | `emotion2vec_plus_large` (~300M) | ~30s (受显存限制) | 9 类 | 泛化能力强，大时长下可能 OOM，支持截断重试 |
+| **`sensevoice`** | `SenseVoiceSmall` (~234M) | 无限制 (内置 VAD 分块) | 7 类 | 内置 VAD，运行速度极快，多功能合一 |
 
-#### 管道中的 SER 执行位置
+---
 
-SER 在归一化之后执行，而非扫描阶段。对于长音频，在切分后对每个片段独立推断情感，而非继承整体标签：
+## 5. 输出文件结构与追溯 (Output Structure)
 
-1. **归一化后** → 对短音频和正常音频执行 SER → 按情感分组合并
-2. **切分后** → 对每个切分段独立执行 SER → 每段有自己的情感标签
-3. **切分失败** → 根据配置 `on_split_failure` 决定隔离或继续推断
-
-#### 切分失败处理
-
-在 `split_and_merge` 中配置：
-```yaml
-split_and_merge:
-  on_split_failure: "ignore"  # "ignore" (继续跑 SER) | "isolate" (移入切分失败/ 子目录)
-```
-
-## 输出文件结构
-
-处理完成后，`output` 文件夹的结构如下：
+运行完成后，所有的处理产物都会写入 `output/` 文件夹下。结构如下：
 
 ```
 output/
-├───Data.log           # 本次处理的详细日志
-├───Data.list           # 可直接用于训练的标注列表文件
-└───Data/                 # 处理后的音频及相关记录
-    ├───！合并记录.txt
-    ├───！切分记录.txt
-    ├───！去重记录.txt
-    ├───！格式审计.txt          # 音频格式元数据审计（新增）
-    ├───！削波检测.txt          # 削波检测报告（新增）
-    ├───！质量报告.txt          # 静默比例与SNR（新增）
-    ├───！00-25-30.txt    # 处理后音频的总时长标记（文件名即时长）
-    ├───Data_merged_1.wav
-    ├───audio1.wav
-    ├───切分失败/             # 切分失败的长音频（仅 on_split_failure="isolate" 时）
-    ├───SER失败/              # SER 推理失败的音频（仅 ser.on_failure="isolate" 时）
-    ├───切分后/
+├───Data.log                  # 本次运行的详细日志
+├───Data.list                  # TTS 训练用格式标注列表 (路径|文本)
+├───Data.jsonl                 # 新增：含丰富元数据 (如时长、情绪标签) 的 JSON 行标注
+└───Data/                      # 音频和审计结果子目录
+    ├───！格式审计.after_scan.txt
+    ├───！静默比例.after_normalize.txt
+    ├───！SNR.after_normalize.txt
+    ├───！削波检测.after_normalize.txt
+    ├───！合并记录.txt          # 短音频拼接合并的追溯记录
+    ├───！切分记录.txt          # 长音频切分的对齐及段落记录
+    ├───！去重记录.txt          # 因 .lab 内容 hash 相同而被去重的记录
+    ├───！00-25-30.txt          # 生成的时长标记空文件 (格式: ！时-分-秒)
+    ├───Data_merged_1.wav      # 合并产生的音频
+    ├───audio1.wav             # 正常流转的归一化音频
+    ├───切分后/                 # (仅当 output_to_split_folder: true 时)
     │   ├───audio2_part1.wav
     │   └───audio2_part2.wav
-    ├───angry/                # 按情感分类的输出目录（动态创建，取决于 SER 后端）
+    ├───隔离/                  # 被检测剔除的不合格音频 (仅 reject_action="isolate" 时)
+    │   ├───clipping_after_normalize/
+    │   └───silence_ratio_after_normalize/
+    ├───切分失败/               # 切分失败的长音频 (仅 on_split_failure="isolate" 时)
+    ├───SER失败/                # SER 报错的音频 (仅 ser.on_failure="isolate" 时)
+    │
+    │   # 情感分类目录 (程序根据情绪类别动态创建)
     ├───neutral/
-    ├───sad/
+    │   ├───audio1.wav -> 软链接或复制
+    │   └───...
+    ├───angry/
     └───...
 ```
+
+---
+
+## 6. 独立审计模式 (Standalone Audit)
+
+如果不希望真正处理音频，仅仅想对数据集进行快速的“健康体检”，可以使用独立审计工具。该工具会运行全部启用的检查项，**不修改文件、不移动文件、忽略阶段配置及拒绝动作**。
+
+### 运行指令：
+```bash
+python audio_validator.py <待审计的输入目录> [config.yaml路径]
+```
+如果没有传入 `config.yaml`，工具将尝试读取当前目录下的 `config.yaml` 或使用默认阈值。
+
+### 审计产物：
+审计完成后，报告将输出到 `output/<输入目录名>/<输入目录名>/` 下（与正常处理时的输出路径一致），生成无阶段后缀的报告：
+* `！格式审计.txt` — 采样率/位深/声道分布，需重采样或转换格式的文件清单。
+* `！削波检测.txt` — 标记峰值超标及削波样本率偏高的文件。
+* `！静默比例.txt` — 包含过多静音或整段全静音的音频清单。
+* `！SNR.txt` — 评估信噪比低（含背景噪音、电流声）的音频清单。
+
+---
+
+## 7. 开发者与测试指南 (Developer Guide)
+
+本仓库配备了完备的测试套件，用以对格式审计、响度归一化、切分动态规划算法等进行回归验证。
+
+运行所有单元测试：
+```bash
+uv run pytest tests/
+# 或
+pytest tests/
+```
+
+* 纯算法（无 I/O）验证见 `tests/test_split_algorithms.py`。
+* 单元测试配置位于 `pytest.ini`。

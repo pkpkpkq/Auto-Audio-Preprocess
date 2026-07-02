@@ -51,6 +51,7 @@ def _install_heavy_import_stubs():
 _install_heavy_import_stubs()
 
 import processor  # noqa: E402
+from config_types import PipelineConfig, NormalizerConfig, SerConfig, SplitConfig  # noqa: E402
 
 
 EVIDENCE_DIR = Path(REPO_ROOT) / ".sisyphus" / "evidence"
@@ -98,26 +99,37 @@ def _make_mp3(source_wav: Path, output_path: Path, sr: int = 22050) -> Path:
     return output_path
 
 
-def _base_config(test_config: dict, input_dir: Path) -> dict:
-    config = test_config.copy()
-    config["root_dir"] = str(input_dir)
-    config["recursive"] = False
-    config["use_lab_text_as_filename"] = False
-    config["ser"] = {"enable": False}
-    config["asr"] = {}
-    config["output"] = {"jsonl_output": True}
-    config["split_and_merge"] = {
-        "short_threshold": 0.25,
-        "long_threshold": 99.0,
-        "merge_silence_duration": 0.0,
-        "output_to_split_folder": False,
-    }
-    config["audio"] = {**test_config["audio"]}
-    config["audio"]["target_sample_rate"] = 44100
-    config["audio"]["target_channels"] = 1
-    config["audio"]["target_bit_depth"] = 16
-    config["audio"]["loudness"] = {**test_config["audio"]["loudness"], "enable": False, "target_lufs": -16}
-    return config
+def _base_config(test_config: PipelineConfig, input_dir: Path) -> PipelineConfig:
+    return PipelineConfig(
+        root_dir=str(input_dir),
+        recursive=False,
+        use_lab_text_as_filename=False,
+        short_threshold=0.25,
+        long_threshold=99.0,
+        output_to_split_folder=False,
+        output_jsonl=True,
+        text_t2s=test_config.text_t2s,
+        text_replace_map=test_config.text_replace_map,
+        ser=SerConfig(enabled=False),
+        asr=test_config.asr,
+        normalizer=NormalizerConfig(
+            target_sample_rate=44100, target_channels=1, target_bit_depth=16,
+            input_formats=test_config.normalizer.input_formats,
+            trim_enabled=test_config.normalizer.trim_enabled,
+            trim_top_db=test_config.normalizer.trim_top_db,
+            trim_frame_length=test_config.normalizer.trim_frame_length,
+            trim_hop_length=test_config.normalizer.trim_hop_length,
+            trim_min_trim_ms=test_config.normalizer.trim_min_trim_ms,
+            trim_keep_padding_ms=test_config.normalizer.trim_keep_padding_ms,
+            loudness_enabled=False, loudness_target_lufs=-16,
+            loudness_true_peak=-1.5, loudness_lra=7, loudness_dual_pass=False,
+            dc_offset_removal_enabled=test_config.normalizer.dc_offset_removal_enabled,
+            dc_offset_threshold=test_config.normalizer.dc_offset_threshold,
+        ),
+        normalizer_enabled=True,
+        checks=test_config.checks,
+        split=test_config.split,
+    )
 
 
 def _output_dir_for(cwd: Path, input_dir: Path) -> Path:
@@ -181,7 +193,7 @@ def test_mixed_format_dataset_end_to_end(
     assert not list(out_dir.rglob("*.mp3"))
     list_path = _list_path_for(tmp_path, input_dir)
     _assert_list_references_wavs_only(list_path)
-    audit_text = (out_dir / "！格式审计.txt").read_text(encoding="utf-8")
+    audit_text = (out_dir / "！格式审计.after_scan.txt").read_text(encoding="utf-8")
     assert "采样率 48000Hz" in audit_text
     assert "采样率 44100Hz" in audit_text
     assert "采样率 22050Hz" in audit_text
@@ -208,21 +220,21 @@ def test_edge_case_files_generate_clipping_and_quality_reports(
     silence = _copy_pair(input_dir, sample_wav_with_silence, "sample_with_silence", "高静默音频")
     before = {p: _md5(p) for p in [ultra_short, clipped, silence]}
     config = _base_config(test_config, input_dir)
-    config["split_and_merge"]["short_threshold"] = 0.05
+    config = PipelineConfig(**{**config.__dict__, "short_threshold": 0.05})
 
     processor.DatasetProcessor(config).run()
 
     out_dir = _output_dir_for(tmp_path, input_dir)
     _assert_all_output_wavs_are_target(out_dir)
-    clipping_text = (out_dir / "！削波检测.txt").read_text(encoding="utf-8")
-    quality_text = (out_dir / "！质量报告.txt").read_text(encoding="utf-8")
+    clipping_text = (out_dir / "！削波检测.after_normalize.txt").read_text(encoding="utf-8")
+    silence_text = (out_dir / "！静默比例.after_normalize.txt").read_text(encoding="utf-8")
     assert "sample_clipped" in clipping_text
-    assert "sample_with_silence" in quality_text
-    assert "静默比例=" in quality_text
+    assert "sample_with_silence" in silence_text
+    assert "静默比例" in silence_text
     assert {p: _md5(p) for p in before} == before
     _write_evidence(
         "task-10-e2e-edge-cases.txt",
-        f"PASS edge cases: clipping report\n{clipping_text}\nquality report\n{quality_text}\n",
+        f"PASS edge cases: clipping report\n{clipping_text}\nsilence report\n{silence_text}\n",
     )
 
 
@@ -301,12 +313,10 @@ def test_short_merge_and_long_split_finalize_in_one_pipeline(tmp_path, monkeypat
 
     monkeypatch.setattr(processor, "AudioSplitter", FakeSplitter)
     config = _base_config(test_config, input_dir)
-    config["split_and_merge"] = {
-        "short_threshold": 0.3,
-        "long_threshold": 1.0,
-        "merge_silence_duration": 0.0,
+    config = PipelineConfig(**{**config.__dict__,
+        "short_threshold": 0.3, "long_threshold": 1.0,
         "output_to_split_folder": False,
-    }
+    })
 
     processor.DatasetProcessor(config).run()
 

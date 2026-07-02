@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import filecmp
 import os
 import sys
@@ -12,24 +11,25 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 from audio_normalizer import _measure_loudness, normalize_loudness  # noqa: E402
-from config_types import NormalizerConfig, build_normalizer_config  # noqa: E402
+from config_types import NormalizerConfig  # noqa: E402
 
 
 EVIDENCE_DIR = os.path.join(REPO_ROOT, ".sisyphus", "evidence")
 
 
-def _loudness_config(test_config, *, enable=True, target_lufs=-16, dual_pass=False):
-    cfg = copy.deepcopy(test_config)
-    cfg["audio"]["loudness"].update(
-        {
-            "enable": enable,
-            "target_lufs": target_lufs,
-            "true_peak": -1.5,
-            "lra": 7,
-            "dual_pass": dual_pass,
-        }
+def _loudness_config(test_config, *, enabled=True, target_lufs=-16, dual_pass=False):
+    base = test_config.normalizer
+    return NormalizerConfig(
+        target_sample_rate=base.target_sample_rate, target_channels=base.target_channels,
+        target_bit_depth=base.target_bit_depth, input_formats=base.input_formats,
+        trim_enabled=base.trim_enabled, trim_top_db=base.trim_top_db,
+        trim_frame_length=base.trim_frame_length, trim_hop_length=base.trim_hop_length,
+        trim_min_trim_ms=base.trim_min_trim_ms, trim_keep_padding_ms=base.trim_keep_padding_ms,
+        loudness_enabled=enabled, loudness_target_lufs=target_lufs,
+        loudness_true_peak=-1.5, loudness_lra=7, loudness_dual_pass=dual_pass,
+        dc_offset_removal_enabled=base.dc_offset_removal_enabled,
+        dc_offset_threshold=base.dc_offset_threshold,
     )
-    return build_normalizer_config(cfg)
 
 
 def _write_evidence(name, content):
@@ -56,7 +56,7 @@ def test_quiet_wav_normalized_close_to_target_lufs(sample_wav_quiet, tmp_path, t
 
 
 def test_loudness_disabled_copies_input_without_ffmpeg(sample_wav_22k_mono, tmp_path, test_config, monkeypatch):
-    cfg = _loudness_config(test_config, enable=False)
+    cfg = _loudness_config(test_config, enabled=False)
     output = tmp_path / "disabled_copy.wav"
 
     def fail_if_called(*args, **kwargs):
@@ -94,7 +94,7 @@ def test_very_short_file_loudnorm_does_not_crash(tmp_path, test_config):
 
 
 def test_loudness_output_sample_rate_pinned(tmp_path, sample_wav_22k_mono, test_config):
-    cfg = build_normalizer_config(test_config)
+    cfg = test_config.normalizer
     out_path = str(tmp_path / "loud_out.wav")
     normalize_loudness(str(sample_wav_22k_mono), out_path, cfg)
     import wave
@@ -102,6 +102,6 @@ def test_loudness_output_sample_rate_pinned(tmp_path, sample_wav_22k_mono, test_
         sr = wf.getframerate()
         ch = wf.getnchannels()
         sw = wf.getsampwidth()
-    assert sr == test_config["audio"]["target_sample_rate"]
-    assert ch == test_config["audio"]["target_channels"]
-    assert sw == test_config["audio"]["target_bit_depth"] // 8
+    assert sr == cfg.target_sample_rate
+    assert ch == cfg.target_channels
+    assert sw == cfg.target_bit_depth // 8

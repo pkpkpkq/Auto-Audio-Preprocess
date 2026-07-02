@@ -49,6 +49,11 @@ def _install_heavy_import_stubs():
 _install_heavy_import_stubs()
 
 import processor  # noqa: E402
+from config_types import (  # noqa: E402
+    PipelineConfig, NormalizerConfig, SerConfig, AsrConfig, AsrWhisperxAlignConfig,
+    SplitConfig, CheckPipelineConfig, AuditCheckConfig, ClippingCheckConfig,
+    SilenceRatioCheckConfig, SnrCheckConfig,
+)
 
 
 EVIDENCE_DIR = Path(REPO_ROOT) / ".sisyphus" / "evidence"
@@ -79,42 +84,45 @@ def _write_pair(root: Path, stem: str, ext: str = ".wav", sr: int = 44100, text:
     return audio_path
 
 
-def _base_config(root: Path, audio: dict | None = None) -> dict:
-    config = {
-        "root_dir": str(root),
-        "recursive": False,
-        "use_lab_text_as_filename": False,
-        "split_and_merge": {
-            "short_threshold": 0.1,
-            "long_threshold": 99.0,
-            "merge_silence_duration": 0.0,
-            "output_to_split_folder": False,
-        },
-        "split": {},
-        "ser": {"enable": False},
-        "asr": {},
-        "text": {"t2s": True, "replace_map": {}},
-        "output": {"jsonl_output": False},
-    }
-    if audio is not None:
-        config["audio"] = audio
-    return config
+def _base_config(root: Path, audio: NormalizerConfig | None = None, checks: CheckPipelineConfig | None = None, audio_enabled: bool = True) -> PipelineConfig:
+    return PipelineConfig(
+        root_dir=str(root),
+        recursive=False,
+        use_lab_text_as_filename=False,
+        short_threshold=0.1,
+        long_threshold=99.0,
+        output_to_split_folder=False,
+        ser=SerConfig(enabled=False),
+        text_t2s=True,
+        normalizer=audio if audio is not None else NormalizerConfig(),
+        normalizer_enabled=audio_enabled,
+        checks=checks if checks is not None else CheckPipelineConfig(),
+    )
 
 
-def _audio_config(enabled: bool = True) -> dict:
-    return {
-        "target_sample_rate": 44100,
-        "target_channels": 1,
-        "target_bit_depth": 16,
-        "input_formats": ["wav", "flac"],
-        "trim_silence": {"enable": enabled, "top_db": 30, "min_trim_ms": 100, "keep_padding_ms": 50},
-        "loudness": {"enable": enabled, "target_lufs": -16, "true_peak": -1.5, "lra": 7},
-        "dc_offset_removal": {"enable": enabled},
-        "audit": {"enable": enabled},
-        "clipping_detection": {"enable": enabled, "clip_threshold": 0.99, "threshold_ratio": 0.01},
-        "silence_ratio": {"enable": enabled, "top_db": 30, "warn_threshold": 0.4, "reject_threshold": 0.7},
-        "snr_estimation": {"enable": enabled, "top_db": 30, "warn_db": 20, "reject_db": 15},
-    }
+def _audio_config(enabled: bool = True) -> NormalizerConfig:
+    return NormalizerConfig(
+        target_sample_rate=44100, target_channels=1, target_bit_depth=16,
+        input_formats=["wav", "flac"],
+        trim_enabled=enabled, trim_top_db=30, trim_min_trim_ms=100, trim_keep_padding_ms=50,
+        loudness_enabled=enabled, loudness_target_lufs=-16, loudness_true_peak=-1.5, loudness_lra=7,
+        dc_offset_removal_enabled=enabled,
+    )
+
+
+def _checks_config(enabled: bool = True) -> CheckPipelineConfig:
+    return CheckPipelineConfig(
+        audit=AuditCheckConfig(enable=enabled, run_at=["after_scan"],
+                               target_sample_rate=44100, target_channels=1, target_bit_depth=16),
+        clipping=ClippingCheckConfig(enable=enabled, run_at=["after_normalize"],
+                                      reject_action="warn_only", clip_threshold=0.99,
+                                      warn_threshold=0.01, reject_threshold=0.05),
+        silence_ratio=SilenceRatioCheckConfig(enable=enabled, run_at=["after_normalize"],
+                                                reject_action="isolate", top_db=30,
+                                                warn_threshold=0.4, reject_threshold=0.7),
+        snr=SnrCheckConfig(enable=enabled, run_at=["after_normalize"],
+                            reject_action="isolate", top_db=30, warn_db=20, reject_db=15),
+    )
 
 
 def _output_dir_for(cwd: Path, root: Path) -> Path:
@@ -138,10 +146,12 @@ def _patch_fast_enabled_audio(monkeypatch, calls: list[str]) -> None:
     monkeypatch.setattr(processor.norm, "normalize_loudness", lambda i, o, c: calls.append("normalize_loudness") or write_target(i, o, c))
     monkeypatch.setattr(processor.val, "audit_audio_metadata", lambda entries, config: calls.append("audit") or {"total": len(entries)})
     monkeypatch.setattr(processor.val, "batch_detect_clipping", lambda entries, config: calls.append("clipping") or [{"wav_path": e.path, "clipped": False} for e in entries])
-    monkeypatch.setattr(processor.val, "batch_quality_check", lambda entries, config: calls.append("quality") or [{"wav_path": e.path, "silence_status": "ok", "snr_status": "ok"} for e in entries])
+    monkeypatch.setattr(processor.val, "batch_check_silence_ratio", lambda entries, config: calls.append("silence_ratio") or [{"wav_path": e.path, "silence_status": "ok"} for e in entries])
+    monkeypatch.setattr(processor.val, "batch_check_snr", lambda entries, config: calls.append("snr") or [{"wav_path": e.path, "snr_status": "ok"} for e in entries])
     monkeypatch.setattr(processor.val, "write_audit_report", lambda data, path: Path(path).write_text("audit ok", encoding="utf-8"))
-    monkeypatch.setattr(processor.val, "write_clipping_report", lambda data, path: Path(path).write_text("clipping ok", encoding="utf-8"))
-    monkeypatch.setattr(processor.val, "write_quality_report", lambda data, path: Path(path).write_text("quality ok", encoding="utf-8"))
+    monkeypatch.setattr(processor.val, "write_clipping_report", lambda data, path, **_k: Path(path).write_text("clipping ok", encoding="utf-8"))
+    monkeypatch.setattr(processor.val, "write_silence_ratio_report", lambda data, path, **_k: Path(path).write_text("silence_ratio ok", encoding="utf-8"))
+    monkeypatch.setattr(processor.val, "write_snr_report", lambda data, path, **_k: Path(path).write_text("snr ok", encoding="utf-8"))
 
 
 def test_full_pipeline_with_audio_preprocessing_enabled(tmp_path, monkeypatch):
@@ -153,7 +163,7 @@ def test_full_pipeline_with_audio_preprocessing_enabled(tmp_path, monkeypatch):
     calls = []
     _patch_fast_enabled_audio(monkeypatch, calls)
 
-    processor.DatasetProcessor(_base_config(input_dir, _audio_config(enabled=True))).run()
+    processor.DatasetProcessor(_base_config(input_dir, _audio_config(enabled=True), _checks_config(enabled=True))).run()
 
     out_dir = _output_dir_for(tmp_path, input_dir)
     wavs = [p for p in out_dir.glob("*.wav")]
@@ -162,12 +172,12 @@ def test_full_pipeline_with_audio_preprocessing_enabled(tmp_path, monkeypatch):
         assert wf.getframerate() == 44100
         assert wf.getnchannels() == 1
         assert wf.getsampwidth() == 2
-    assert (out_dir / "！格式审计.txt").exists()
-    assert (out_dir / "！削波检测.txt").exists()
-    assert (out_dir / "！质量报告.txt").exists()
+    assert (out_dir / "！格式审计.after_scan.txt").exists()
+    assert (out_dir / "！削波检测.after_normalize.txt").exists()
+    assert (out_dir / "！静默比例.after_normalize.txt").exists()
     assert (tmp_path / "output" / input_dir.name / f"{input_dir.name}.list").exists()
     assert _md5(source) == before
-    assert calls == ["audit", "normalize_format", "trim_silence", "normalize_loudness", "clipping", "quality"]
+    assert calls == ["audit", "normalize_format", "trim_silence", "normalize_loudness", "clipping", "silence_ratio", "snr"]
     _write_evidence("task-9-full-pipeline.txt", f"PASS full pipeline: {wavs[0]} calls={calls}\n")
 
 
@@ -179,16 +189,16 @@ def test_pipeline_with_all_audio_features_disabled(tmp_path, monkeypatch):
     before = _md5(source)
     monkeypatch.setattr(processor.norm, "normalize_format", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("normalization disabled")))
 
-    processor.DatasetProcessor(_base_config(input_dir, _audio_config(enabled=False))).run()
+    processor.DatasetProcessor(_base_config(input_dir, _audio_config(enabled=False), _checks_config(enabled=False))).run()
 
     out_dir = _output_dir_for(tmp_path, input_dir)
     output_wav = out_dir / source.name
     assert output_wav.exists()
     assert _md5(source) == before
     assert _md5(output_wav) == before
-    assert not (out_dir / "！格式审计.txt").exists()
-    assert not (out_dir / "！削波检测.txt").exists()
-    assert not (out_dir / "！质量报告.txt").exists()
+    assert not (out_dir / "！格式审计.after_scan.txt").exists()
+    assert not (out_dir / "！削波检测.after_normalize.txt").exists()
+    assert not (out_dir / "！静默比例.after_normalize.txt").exists()
     _write_evidence("task-9-disabled-pipeline.txt", f"PASS disabled pipeline: {output_wav}\n")
 
 
@@ -200,7 +210,7 @@ def test_no_audio_section_keeps_original_input_unmodified(tmp_path, monkeypatch)
     before = _md5(source)
     monkeypatch.setattr(processor.norm, "normalize_format", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("audio config absent")))
 
-    processor.DatasetProcessor(_base_config(input_dir, audio=None)).run()
+    processor.DatasetProcessor(_base_config(input_dir, audio=None, audio_enabled=False)).run()
 
     assert _md5(source) == before
     assert (_output_dir_for(tmp_path, input_dir) / source.name).exists()
@@ -215,7 +225,7 @@ def test_non_wav_input_converted_and_list_references_wav(tmp_path, monkeypatch):
     calls = []
     _patch_fast_enabled_audio(monkeypatch, calls)
 
-    processor.DatasetProcessor(_base_config(input_dir, _audio_config(enabled=True))).run()
+    processor.DatasetProcessor(_base_config(input_dir, _audio_config(enabled=True), _checks_config(enabled=True))).run()
 
     out_dir = _output_dir_for(tmp_path, input_dir)
     wavs = list(out_dir.glob("*.wav"))

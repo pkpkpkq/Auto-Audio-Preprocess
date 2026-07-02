@@ -9,52 +9,44 @@ from collections import Counter, defaultdict
 # Local module imports
 from asr import transcribe_audio
 from audio_splitter import AudioSplitter
-from audio_entry import AudioEntry
 import audio_utils as au
 import audio_normalizer as norm
 import audio_validator as val
-from config_types import NormalizerConfig, ValidatorConfig, SplitConfig, SerConfig, build_normalizer_config, build_validator_config, build_split_config, build_ser_config
+from config_types import PipelineConfig, NormalizerConfig, SplitConfig, SerConfig, AsrConfig, CheckPipelineConfig, AuditCheckConfig, ClippingCheckConfig, SilenceRatioCheckConfig, SnrCheckConfig, AudioEntry, PIPELINE_STAGES
 
 class DatasetProcessor:
     """封装整个数据集处理流程的类"""
 
-    def __init__(self, config):
+    def __init__(self, config: PipelineConfig):
         """
         初始化处理器。
-        :param config: 从 config.yaml 加载的配置字典。
+        :param config: 完整的 PipelineConfig 实例。
         """
-        self.config = config
-        self.root_dir = os.path.abspath(config['root_dir'])
+        self._cfg = config
+        self.root_dir = os.path.abspath(config.root_dir)
         
         if not os.path.isdir(self.root_dir):
             raise ValueError(f"配置中指定的根目录不存在或不是目录: {self.root_dir}")
 
-        # 从配置中提取参数
-        self.recursive = self.config.get('recursive', False)
-        self.use_lab_text_as_filename = self.config.get('use_lab_text_as_filename', False)
-        
-        split_merge_config = self.config.get('split_and_merge', {})
-        self.output_to_split_folder = split_merge_config.get('output_to_split_folder', True)
+        self.recursive = config.recursive
+        self.use_lab_text_as_filename = config.use_lab_text_as_filename
+        self.output_to_split_folder = config.output_to_split_folder
 
-        text_config = self.config.get('text', {})
-        self.replace_map = text_config.get('replace_map', {})
-        self.t2s_enabled = text_config.get('t2s', True)
+        self.replace_map = config.text_replace_map
+        self.t2s_enabled = config.text_t2s
 
-        self.asr_config = self.config.get('asr', {})
+        self.asr_config = config.asr
         
-        self._ser_config = build_ser_config(config)
-        self.ser_enabled = self._ser_config.enabled
+        self._ser_config = config.ser
+        self.ser_enabled = config.ser.enabled
         self.ser_recognizer = None
         # Lazy init: model loaded on first use
 
-        self.audio_config = self.config.get('audio', {})
+        self._norm_config = config.normalizer
+        self._check_config = config.checks
+        self._split_config = config.split
 
-        self._norm_config = build_normalizer_config(config)
-        self._val_config = build_validator_config(config)
-        self._split_config = build_split_config(config)
-
-        output_config = self.config.get('output', {})
-        self.jsonl_output_enabled = output_config.get('jsonl_output', False)
+        self.jsonl_output_enabled = config.output_jsonl
 
         self.folder_name = os.path.basename(self.root_dir.rstrip(os.sep))
         if not self.folder_name:
@@ -68,7 +60,6 @@ class DatasetProcessor:
         self.auto_merge_dir = None
         self.auto_split_dir = None
         self.log_path = None
-        # self.out_list_path = None # 将被替换为按情感分类的列表
         self.logger = None
 
     def _ensure_ser_model(self):
@@ -163,8 +154,8 @@ class DatasetProcessor:
             match = matcher.find_longest_match(lo, hi, 0, len(pattern_norm))
 
             if match.size > 0 and (match.size / len(pattern_norm)) >= MIN_MATCH_RATIO:
-                if match.b != 0 and hasattr(self, 'logger') and self.logger:
-                    self.logger.debug(
+                if match.b != 0:
+                    self.logger.warning(
                         f"模糊匹配未锚定到模式起始 (offset={match.b}, "
                         f"size={match.size}/{len(pattern_norm)})，提取边界可能偏移")
                 return match.a, match.a + match.size
@@ -228,8 +219,7 @@ class DatasetProcessor:
         if "{ASR}" not in temp_lab:
             return temp_lab
 
-        if self.logger:
-            self.logger.info(f"检测到 {{ASR}} 占位符，对 {wav_path} 执行 ASR...")
+        self.logger.info(f"检测到 {{ASR}} 占位符，对 {wav_path} 执行 ASR...")
 
         # ===== 多 {ASR} 预拆分 (Bug #2 修复) =====
         # 1. 按 {ASR} 分割，得到纯静态文本段
@@ -249,8 +239,7 @@ class DatasetProcessor:
 
             asr_full_text = "".join(seg["text"] for seg in segments).strip()
             asr_full_text = au.traditional_to_simplified(asr_full_text, self.t2s_enabled)
-            if self.logger:
-                self.logger.info(f"ASR 全文结果: {asr_full_text}")
+            self.logger.info(f"ASR 全文结果: {asr_full_text}")
 
             # 2. 逐个提取，追踪 ASR 文本消耗偏移
             replacements = []
@@ -268,8 +257,7 @@ class DatasetProcessor:
 
                 if extracted is not None:
                     replacements.append(extracted)
-                    if self.logger:
-                        self.logger.info(f"第 {i+1} 个占位符提取成功: '{extracted}'")
+                    self.logger.info(f"第 {i+1} 个占位符提取成功: '{extracted}'")
                     # 更新偏移：推算此提取消耗了多少规范化文本
                     _norm_extracted = self._PUNCT_WS_RE.sub('', extracted)
                     # 静态 suffix 在 norm 空间中的匹配位置即下一次搜索起点
@@ -278,9 +266,7 @@ class DatasetProcessor:
                     asr_consumed_norm += len(_norm_extracted) + len(norm_suffix)
                 else:
                     replacements.append("{ASR_FAILED}")
-                    if self.logger:
-                        self.logger.warning(
-                            f"第 {i+1} 个占位符提取失败，保留失败标记")
+                    self.logger.warning(f"第 {i+1} 个占位符提取失败，保留失败标记")
 
             # 3. 重组：静态段 + 替换结果交替拼接
             final_parts = []
@@ -294,16 +280,17 @@ class DatasetProcessor:
 
         except Exception as e:
             error_msg = f"ASR 处理失败: {e}"
-            if self.logger:
-                self.logger.warning(error_msg)
-            else:
-                print(f"[WARN] {error_msg}", file=sys.stderr)
+            self.logger.warning(error_msg)
             return temp_lab
 
     def _setup_paths_and_logging(self):
         """设置所有输出路径并配置日志记录。"""
         self.base_output_dir = os.path.join(os.path.abspath("output"), self.folder_name)
         self.output_dir = os.path.join(self.base_output_dir, self.folder_name)
+
+        if not au.confirm_output_dir(self.base_output_dir):
+            sys.exit(0)
+
         os.makedirs(self.output_dir, exist_ok=True)
         print(f"[INFO] 主要音频输出将被保存到: {self.output_dir}")
 
@@ -324,12 +311,8 @@ class DatasetProcessor:
         self.auto_split_dir = self.temp_dir
 
         self.log_path = os.path.join(self.base_output_dir, f"{self.folder_name}.log")
-        # self.out_list_path is now handled dynamically based on emotion
         # 将去重记录移动到角色文件夹下
         self.dedup_log_path = os.path.join(self.output_dir, "！去重记录.txt")
-        self.audit_report_path = os.path.join(self.output_dir, "！格式审计.txt")
-        self.clipping_report_path = os.path.join(self.output_dir, "！削波检测.txt")
-        self.quality_report_path = os.path.join(self.output_dir, "！质量报告.txt")
 
         self.logger = logging.getLogger("tts_preprocess")
         self.logger.setLevel(logging.INFO)
@@ -353,16 +336,8 @@ class DatasetProcessor:
         self.logger.info("="*50)
 
     @staticmethod
-    def _pick_primary_audio(stem, dirpath, extmap, config):
-        """在同 stem 的多个音频格式中选定主音频。优先级：.wav > 其余按 input_formats 顺序。
-
-        :param stem: 文件主干名（含递归路径）
-        :param dirpath: 所在目录
-        :param extmap: 扩展名到文件名的映射（含 ".lab"）
-        :param config: 整个音频配置 dict（含 'input_formats' 列表）
-        :return: 选定音频文件的完整路径，找不到任何支持的音频返回 None
-        """
-        input_formats = config.get("input_formats", ["wav"])
+    def _pick_primary_audio(stem, dirpath, extmap, input_formats):
+        """在同 stem 的多个音频格式中选定主音频。优先级：.wav > 其余按 input_formats 顺序。"""
         supported_exts = [f".{fmt.lower()}" for fmt in input_formats]
         for fmt_ext in (".wav",) + tuple(e for e in supported_exts if e != ".wav"):
             if fmt_ext in extmap:
@@ -374,7 +349,7 @@ class DatasetProcessor:
         import datetime
         stems = {}
 
-        input_formats = self.audio_config.get("input_formats", ["wav"])
+        input_formats = self._cfg.normalizer.input_formats
         supported_exts = {f".{fmt.lower()}" for fmt in input_formats}
         supported_exts.add(".lab")
 
@@ -421,7 +396,7 @@ class DatasetProcessor:
                 skipped_pairing += 1
                 continue
 
-            wav_path = self._pick_primary_audio(stem_key, extmap["dirpath"], extmap, self.audio_config)
+            wav_path = self._pick_primary_audio(stem_key, extmap["dirpath"], extmap, self._cfg.normalizer.input_formats)
             if wav_path is None:
                 skipped_pairing += 1
                 continue
@@ -500,8 +475,7 @@ class DatasetProcessor:
         return matched
 
     def _normalize_audio(self, all_entries):
-        audio_config = self.audio_config or {}
-        if not audio_config:
+        if not self._cfg.normalizer_enabled:
             return all_entries
 
         trim_enabled = self._norm_config.trim_enabled
@@ -869,65 +843,115 @@ class DatasetProcessor:
         print(overall_summary)
         self.logger.info(overall_summary)
 
+    def _run_checks_at_stage(self, entries, stage):
+        """在指定 pipeline 阶段运行所有适用检查，返回过滤后的条目列表。"""
+        if not entries:
+            return entries
+
+        reject_records = val.run_check_pipeline(
+            entries, self._check_config, stage, self.output_dir
+        )
+
+        if not reject_records:
+            return entries
+
+        rejected_paths = set()
+        path_to_isolate_info = {}
+        for wav_path, check_name, action, stage_name in reject_records:
+            if wav_path and wav_path not in rejected_paths:
+                rejected_paths.add(wav_path)
+                folder_name = f"{check_name}_{stage_name}"
+                path_to_isolate_info[wav_path] = (folder_name, action)
+
+        for wav_path, (folder_name, action) in path_to_isolate_info.items():
+            if action == "isolate":
+                isolate_dir = os.path.join(self.output_dir, "隔离", folder_name)
+                os.makedirs(isolate_dir, exist_ok=True)
+                if os.path.exists(wav_path):
+                    dest = os.path.join(isolate_dir, os.path.basename(wav_path))
+                    try:
+                        shutil.copy2(wav_path, dest)
+                        self.logger.info(f"已隔离: {os.path.basename(wav_path)} → 隔离/{folder_name}/")
+                    except Exception as e:
+                        self.logger.error(f"隔离文件 {wav_path} 失败: {e}")
+
+        isolate_count = sum(1 for v in path_to_isolate_info.values() if v[1] == "isolate")
+        remove_count = sum(1 for v in path_to_isolate_info.values() if v[1] == "remove")
+        if isolate_count:
+            self.logger.info(f"共隔离 {isolate_count} 个文件")
+        if remove_count:
+            self.logger.info(f"共移除 {remove_count} 个不合格文件")
+
+        remaining = [e for e in entries if e.path not in rejected_paths]
+        removed_count = len(entries) - len(remaining)
+        if removed_count > 0:
+            self.logger.info(f"检测阶段 {stage} 剔除 {removed_count} 个条目，保留 {len(remaining)} 个")
+
+        return remaining
+
     def run(self):
         """执行完整的数据集处理流程。"""
         self._setup_paths_and_logging()
         all_entries = self._find_audio_entries()
 
-        if self._val_config.audit_enabled:
-            audit_data = val.audit_audio_metadata(all_entries, self._val_config)
-            val.write_audit_report(audit_data, self.audit_report_path)
+        # Stage: after_scan
+        all_entries = self._run_checks_at_stage(all_entries, "after_scan")
 
+        # Normalize
         all_entries = self._normalize_audio(all_entries)
 
-        if self._val_config.clipping_enabled:
-            clipping_data = val.batch_detect_clipping(all_entries, self._val_config)
-            val.write_clipping_report(clipping_data, self.clipping_report_path)
+        # Stage: after_normalize
+        all_entries = self._run_checks_at_stage(all_entries, "after_normalize")
 
-        if self._val_config.silence_ratio_enabled or self._val_config.snr_enabled:
-            quality_data = val.batch_quality_check(all_entries, self._val_config)
-            val.write_quality_report(quality_data, self.quality_report_path)
+        # Duration classification
+        short_threshold = self._cfg.short_threshold
+        long_threshold = self._cfg.long_threshold
 
-        thresholds = self.config.get('split_and_merge', {'short_threshold': 2.0, 'long_threshold': 15.0})
-        short_threshold = thresholds.get('short_threshold', 2.0)
-        long_threshold = thresholds.get('long_threshold', 15.0)
+        # Stage: after_classify
+        all_entries = self._run_checks_at_stage(all_entries, "after_classify")
 
         short_list = [m for m in all_entries if m.duration <= short_threshold]
         normal_list = [m for m in all_entries if short_threshold < m.duration < long_threshold]
         long_list = [m for m in all_entries if m.duration >= long_threshold]
 
-        # SER(1): 对 short + normal 音频执行情感分类
+        # SER(1): on short + normal entries
         if self.ser_enabled:
             self._run_ser_on_entries(short_list)
             self._run_ser_on_entries(normal_list)
 
-        # 合并短音频 (按情感分组)
+        # Merge short
         processed_short_entries, merge_map_lines = self._process_short_files(short_list)
 
-        # 切分长音频
+        # Reconstitute combined list: normal + processed_short (long pending split)
+        all_entries = normal_list + processed_short_entries
+
+        # Stage: after_merge
+        all_entries = self._run_checks_at_stage(all_entries, "after_merge")
+
+        # Split long
         unsplit_long_entries, split_entries = self._process_long_files(long_list)
 
-        # SER(2): 对切分段执行独立情感分类
+        # SER(2): on split segments
         if self.ser_enabled:
             self._run_ser_on_entries(split_entries)
 
-        # 处理切分失败的长音频
+        # Handle split failures
         if unsplit_long_entries:
             on_split_failure = self._split_config.on_split_failure
             if on_split_failure == "isolate":
                 self._isolate_entries(unsplit_long_entries, "切分失败")
                 unsplit_long_entries = []
-            else:  # "ignore" - 保留在流程中, 跑 SER
+            else:  # "ignore"
                 if self.ser_enabled:
                     self._run_ser_on_entries(unsplit_long_entries)
 
-        final_entries_before_copy = []
-        final_entries_before_copy.extend(normal_list)
-        final_entries_before_copy.extend(unsplit_long_entries)
-        final_entries_before_copy.extend(split_entries)
-        final_entries_before_copy.extend(processed_short_entries)
+        # Combine all entries (no after_split stage — merged into final)
+        all_entries = all_entries + unsplit_long_entries + split_entries
 
-        self._finalize_output(final_entries_before_copy, merge_map_lines, len(all_entries))
+        # Stage: final
+        all_entries = self._run_checks_at_stage(all_entries, "final")
+
+        self._finalize_output(all_entries, merge_map_lines, len(all_entries))
         self._cleanup_temp_files()
 
     def _cleanup_temp_files(self):

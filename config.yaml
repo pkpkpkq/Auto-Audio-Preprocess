@@ -2,18 +2,59 @@
 
 # ============================================================
 # 配置项按管道执行顺序排列:
-#   1.输入扫描 → 2.文本处理 → 3.格式审计 → 4.音频归一化
-#   → 5.削波检测 → 6.质量检测 → 7.时长分类 → 8.情感分类(SER)
-#   → 9.短音频合并(SER后) → 10.长音频切分 → 11.切分段SER
-#   → 12.输出 → 13.清理缓存
+#   1.输入扫描/文本处理 → 检查(after_scan) → 2.音频归一化
+#   → 检查(after_normalize) → 3.时长分类 → 检查(after_classify)
+#   → 4.情感分类(SER) → 5.短音频合并 → 检查(after_merge)
+#   → 6.长音频切分+切分段SER → 检查(final)
+#   → 10.输出 → 11.清理缓存
 # ============================================================
+
+# ============================================================
+# 检查流水线
+# run_at 可选阶段: after_scan, after_normalize, after_classify, after_merge, final
+# reject_action: warn_only=仅报告, isolate=复制到 隔离/<检查名>_<阶段>/ 并移出流程, remove=直接移出流程
+# 注意: 同一检查配置多个 run_at 时, 仅最后一次执行会真正应用拒绝动作
+# ============================================================
+checks:
+  audit:
+    enable: true
+    run_at: ["after_scan", "final"] 
+    target_sample_rate: 44100
+    target_channels: 1
+    target_bit_depth: 16
+
+  clipping:
+    enable: true
+    run_at: ["after_normalize", "final"]  
+    reject_action: "isolate"   # 默认仅报告；如需剔除可改为 isolate/remove
+    clip_threshold: 0.99          # 振幅 ≥ 0.99 (即 -0.04 dBFS) 视为削波
+    warn_threshold: 0.01          # 削波样本比例 > 1% 警告
+    reject_threshold: 0.05       # 削波样本比例 > 5% 拒绝
+
+  silence_ratio:
+    enable: true
+    run_at: ["after_normalize", "final"]  
+    reject_action: "isolate"     # 拒绝样本复制到隔离目录并移出流程
+    top_db: 30                    # 静音判定门限 (同 trim_silence.top_db)
+    warn_threshold: 0.4           # 静默比例 > 40% 警告
+    reject_threshold: 0.7         # 静默比例 > 70% 拒绝
+
+  snr:
+    enable: true
+    run_at: ["after_normalize", "final"]
+    reject_action: "isolate"
+    top_db: 30                    # VAD-SNR 的语音/噪声分离门限
+    warn_db: 20                   # SNR < 20dB 警告
+    reject_db: 15                 # SNR < 15dB 拒绝
+
+
 
 # ============================================================
 # 1.输入扫描
 # 扫描目录中音频 + .lab 配对文件, 同内容 hash 去重, 多格式优先选 .wav
 # ============================================================
 # 输入目录：包含音频和 .lab 文件的原始数据集文件夹
-root_dir: ''
+root_dir: './input/芙宁娜-emo'
 # 是否递归处理输入目录下的所有子文件夹
 # true:  处理所有子文件夹中的文件
 # false: 仅处理根目录下的文件
@@ -58,36 +99,58 @@ text:
     "{NICKNAME}": "{SKIP}"
 
 # --- ASR (自动语音识别) ---
-# 在扫描阶段为 {ASR} 占位符提供语音识别, 在切分阶段为长音频提供 whisperX 强制对齐
+# 在扫描阶段为 {ASR} 占位符提供语音识别
+# FunASR 后端支持三种模型 (根据 model 名自动检测):
+#   paraformer-zh:     纯 ASR, 需 punc_model 加标点, 不返回 timestamp (force_align 降级为 WhisperX 补全)
+#   SenseVoiceSmall:   ASR+情感+事件, 自带标点, text 含 <|NEUTRAL|> 等富标记需后处理,
+#                      force_align=true 时需额外传 output_timestamp=True 才返回 timestamp
+#   Fun-ASR-Nano-2512: LLM 架构, 自带标点, 不生成 timestamp (force_align 降级为 WhisperX 补全),
+#                      不支持 batch decoding (内部自动用 batch_size=1 代替 batch_size_s)
 asr:
-  language: "zh"  # ASR 语言: "zh" 中文, "en" 英文, "ja" 日文 等
-  # FunASR 参数 (Paraformer 中文语音识别模型)
+  language: "zh"  # ASR 语言 (通用 ISO 代码, 内部自动映射为各模型格式):
+                   #   "zh"|"en"|"ja"|"yue"|"ko"|"auto"|"nospeech"
+                   #   paraformer-zh:  忽略此字段 (仅支持中文)
+                   #   SenseVoiceSmall: 直接使用上述代码 ("auto"=自动检测, "nospeech"=静音检测)
+                   #   Fun-ASR-Nano-2512: 自动映射为中文全称 ("zh"→"中文", "en"→"英文", "ja"→"日文",
+                   #                     "yue"→"粤语", "ko"→"韩文", "auto"/"nospeech"=不传)
+  backend: "funasr"  # ASR 后端: "funasr" (FunASR) | "whisperx" (WhisperX Whisper)
+  # 强制对齐开关: true=返回字符级时间戳 segment; false=返回纯文本单个 segment
+  # 为后续 ASR 逻辑 (如精确的占位符文本定位) 准备的时间戳数据
+  # 注意: Fun-ASR-Nano-2512 和Whisper模型不自带 timestamp, force_align=true 时自动调用 WhisperX 强制对齐补全
+  force_align: True
+  # FunASR 参数 (backend="funasr" 时生效)
   funasr:
-    model: "paraformer-zh"   # FunASR 模型: paraformer-zh (中文), paraformer-zh-streaming (流式)
-    use_vad: false            # 是否使用语音活动检测 (VAD) 分段长音频
-  # WhisperX 参数 (基于 Whisper 的强制对齐)
+    model: "FunAudioLLM/SenseVoiceSmall"
+                                     # FunASR 模型:
+                                     #   paraformer-zh (中文 ASR)
+                                     #   FunAudioLLM/SenseVoiceSmall (ASR+情感+事件) 
+                                     #   FunAudioLLM/Fun-ASR-Nano-2512 (LLM 架构 ASR)
+    use_vad: true            # 是否使用语音活动检测 (VAD) 分段长音频, 推荐对长音频开启
+    vad_max_single_segment_time: 30000  # VAD 单段最大时长 ms (use_vad=true 时生效)
+    itn: true                # 逆文本归一化 + 标点:
+                             #   SenseVoiceSmall: 映射为 use_itn, 同时控制标点和数字归一化 (绑定, 不可分离)
+                             #   Fun-ASR-Nano-2512: 映射为 itn, 标点由模型内置始终输出
+                             #   paraformer-zh: 忽略, 标点由独立 punc_model (ct-punc) 负责
+  # WhisperX 参数 (backend="whisperx" 时生效)
   whisperx:
     model: "large-v2"  # Whisper 模型: tiny/base/small/medium/large-v2/large-v3
                         # large-v2 中文效果最佳; medium 为速度/精度折衷
     batch_size: 16     # 推理批大小, GPU 显存不足时减小 (8/4)
+  # WhisperX 强制对齐参数 (force_align=true 且 backend="whisperx" 时生效)
+  # 注意: 此配置独立于 split 段的对齐配置, 不复用切分长音频时的模型/设备
+  whisperx_align:
+    device: "auto"     # 对齐模型设备: "cuda", "cpu", "auto" (自动检测)
+    language: "zh"     # 对齐模型语言代码 (默认继承 asr.language)
 
 # ============================================================
-# 3.格式审计 + 4.音频归一化 (逐条处理, 写入 temp_dir, 原文件不动)
-#   4a. 格式归一化 + DC偏移消除
-#   4b. 首尾静音修剪
-#   4c. LUFS 响度归一化
+# 3.音频归一化 (逐条处理, 写入 temp_dir, 原文件不动)
+#   3a. 格式归一化 + DC偏移消除
+#   3b. 首尾静音修剪
+#   3c. LUFS 响度归一化
 # 缺少 audio: 段时，管道行为与旧版一致 (不执行预处理)
 # ============================================================
 audio:
-  # ── 3.格式审计 ──
-  # 扫描所有输入文件格式元数据，输出 ！格式审计.txt
-  # 在归一化之前执行, 记录原始状态
-  audit:
-    enable: true               # 生成格式审计报告
-                               # 报告内容: 采样率/位深/声道分布、需转换的文件清单
-                               # 建议首次处理新数据集时开启，确认后可关闭以节省时间
-
-  # ── 4a.格式归一化 ──
+  # ── 3a.格式归一化 ──
   # 将任意输入格式统一转为 WAV 16-bit PCM，重采样到目标采样率
   # 通过 ffmpeg 实现: -ar <采样率> -ac <声道> -sample_fmt s16
   target_sample_rate: 44100    # 目标采样率 (Hz)
@@ -120,7 +183,7 @@ audio:
   # 在格式归一化步骤中附带执行，使用 ffmpeg highpass=f=5 滤波器
   # 去除 5Hz 以下的直流分量 (人声不可闻但对浮点计算有害)
   dc_offset_removal:
-    enable: true               # 默认开启，在格式归一化时一并执行
+    enabled: true               # 默认开启，在格式归一化时一并执行
                                # RVC 使用 48Hz 巴特沃斯高通滤波器 (5 阶) 做类似处理
                                # 5Hz 高通更温和 (仅去直流)，48Hz 更激进 (也去低频隆隆声)
     threshold: 0.001           # DC 偏移量 (均值) 大于此值才执行消除
@@ -131,7 +194,7 @@ audio:
   # 使用 librosa.effects.trim 检测首尾静音段并裁剪
   # 修剪后通过 soundfile 写出 (保证采样率无损)
   trim_silence:
-    enable: true
+    enabled: true
     top_db: 30                 # 低于峰值此 dB 值的帧视为"静音" (librosa 默认 60dB)
                                # ── 判断方法: 相对峰值门限法 (Relative Peak Thresholding) ──
                                # 1. 按 frame_length/hop_length 分帧，计算每帧 RMS 振幅 (dB)
@@ -173,7 +236,7 @@ audio:
   # 基于 EBU R128 标准 (ITU-R BS.1770)，使用 ffmpeg loudnorm 滤波器
   # 确保数据集内所有音频的感知响度一致
   loudness:
-    enable: true
+    enabled: true
     target_lufs: -16           # 目标响度 (LUFS, 加权分贝)
                                # ┌──────────────────────────────┬───────────┐
                                # │ 用途/标准                    │ LUFS      │
@@ -236,69 +299,6 @@ audio:
                                # TTS/SVC 推荐: true (保留自然动态，避免压缩伪影)
                                # 参考: https://ffmpeg-cookbook.com/en/articles/loudness-normalization/
 
-  # ── 5.削波检测 ──
-  # 归一化之后执行, 扫描所有样本检测振幅超过阈值的削波 (硬削波/限幅)
-  # 输出 ！削波检测.txt
-  clipping_detection:
-    enable: true
-    threshold_ratio: 0.01     # 超过此比例的样本削波才报警 (0.01 = 1%)
-                               # ┌────────────────┬────────────────────────────┐
-                               # │ 削波样本比例    │ 对语音处理的影响            │
-                               # ├────────────────┼────────────────────────────┤
-                               # │ ≤ 0.5%         │ 几乎不可感知                │
-                               # │ ≤ 1% (当前值)  │ 影响极小 (NSF/CMU 研究证实) │
-                               # │ 5%             │ 明显可感知，质量退化        │
-                               # │ 10%            │ 不可接受，文件应废弃        │
-                               # └────────────────┴────────────────────────────┘
-                               # 来源: Harvilla & Stern (2015), NSF/CMU 削波影响研究
-                               #   https://par.nsf.gov/servlets/purl/10298338
-    clip_threshold: 0.99      # 振幅 ≥ 0.99 (即 -0.04 dBFS) 视为削波
-                               # 0 dBFS (1.0)  = 数字硬削波 (满幅)
-                               # 0.99 (当前值) = 保守阈值，捕获接近满幅的预削波
-                               # 0.95          = 严格阈值，也标记近削波信号
-                               # 专业工具参考: Audacity clipfix 默认 95%
-
-  # ── 6.质量检测 ──
-  # 归一化之后执行, 检测静默比例和信噪比
-  # 输出 ！质量报告.txt
-
-  # 静默比例检测: 计算音频中静音占整体时长的比例
-  silence_ratio:
-    enable: true
-    top_db: 30                # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
-                               # 用 librosa.effects.split 区分语音帧与静音帧
-                               # 统计语音帧与总样本数的占比 (不涉及功率计算)
-    warn_threshold: 0.4       # 静默比例 > 40% 警告
-                               # TTS=0.3-0.4 / SVC=0.4-0.5
-                               # TTS 数据 (干净朗读) 理想静默 <10-20%
-                               # SVC 歌唱有乐句间停顿，30-40% 属正常 (尤其是抒情曲)
-    reject_threshold: 0.7     # 静默比例 > 70% 拒绝
-                               # TTS=0.5-0.7 / SVC=0.6-0.7
-                               # 参考标准: ITU-T P.563 规定语音活动度 <25% (即静默 >75%)
-                               #   时样本质量预测为差; 当前 70% 与该标准一致
-                               # 录音棚 TTS 数据可收紧至 warn=0.25 / reject=0.50
-
-  # VAD-SNR 估计: 基于语音活动检测 (VAD) 分离语音/非语音段，估算信噪比
-  snr_estimation:
-    enable: true
-    top_db: 30                # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
-                               # 用 librosa.effects.split 分离语音帧与噪声帧
-                               # 语音帧 → 信号功率 p_speech; 噪声帧 → 噪声功率 p_noise
-                               # SNR = 10·log₁₀(p_speech / p_noise)
-    warn_db: 20               # SNR < 20dB 发出警告
-                               # TTS=20 / SVC=15
-                               # ┌────────────────┬───────────────────────┐
-                               # │ SNR 范围        │ 质量                   │
-                               # ├────────────────┼───────────────────────┤
-                               # │ > 40 dB         │ 专业录音棚              │
-                               # │ 30-40 dB        │ 高质量 (推荐标准)       │
-                               # │ 20-30 dB        │ 可接受 (TTS 可用)       │
-                               # │ 15-20 dB        │ 边缘 (需人工检查)       │
-                               # │ < 15 dB         │ 不可接受 (应拒绝)       │
-                               # └────────────────┴───────────────────────┘
-    reject_db: 15             # SNR < 15dB 拒绝
-                               # TTS=15 / SVC=10
-                               # ASR 系统通常需要 >30dB; TTS 更宽容; SVC 消费级录音噪声更高
 
 # ============================================================
 # 7.情感分类
@@ -313,7 +313,7 @@ audio:
 # SER 在归一化后执行, 长音频切分后每个片段独立推断
 # ============================================================
 ser:
-  enable: true
+  enabled: true
   backend: "hubert"    # "hubert" | "emotion2vec" | "sensevoice"
   device: "auto"       # "cuda", "cpu", "auto"
 
@@ -339,7 +339,6 @@ ser:
     language: "auto"           # "zh"|"en"|"yue"|"ja"|"ko"|"auto"
     use_itn: true
     ban_emo_unk: false
-    vad_model: "fsmn-vad"
     vad_max_single_segment_time: 30000  # ms
 
 # ============================================================
@@ -375,7 +374,7 @@ split_and_merge:
 #        RVC 按固定 3.7s 切分 (代码强制4秒一切)
 #        Diff-SVC 24kHz 训练，切片 ~5-10s
 split:
-  # --- 模型与设备 ---
+  # --- whisperx对齐模型与设备 ---
   device: "auto"              # "cuda", "cpu", "auto" (自动检测 GPU)
   language: "zh"              # whisperx 使用的语言代码
                                # "zh" 中文, "en" 英文, "ja" 日文 等
@@ -418,5 +417,5 @@ use_lab_text_as_filename: false
 
 output:
   jsonl_output: true # true: 为每个 .list 文件生成对应 .jsonl 格式标注文件
-                     # .list: 路径|文本 格式 (兼容多数 TTS 框架)
+                     # .list: 路径|文本 格式 (GPT-SoVITS)
                      # .jsonl: JSON 行格式 (含更多元数据，如情感标签)

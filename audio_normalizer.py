@@ -161,7 +161,7 @@ def _measure_loudness(input_path, config: NormalizerConfig):
         f"TP={_format_number(values['tp'])}:print_format=json"
     )
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-y", "-hide_banner",
         "-loglevel", "info",
         "-i", input_path,
         "-af", loudnorm_filter,
@@ -169,14 +169,18 @@ def _measure_loudness(input_path, config: NormalizerConfig):
     ]
 
     try:
-        result = subprocess.run(cmd, check=True, timeout=300, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=True, timeout=300, capture_output=True, text=True, encoding="utf-8")
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"ffmpeg loudnorm 测量超时: {input_path}") from e
     except subprocess.CalledProcessError as e:
         detail = e.stderr or e.stdout or str(e)
         raise RuntimeError(f"ffmpeg loudnorm 测量失败: {input_path}: {detail}") from e
 
-    return _parse_loudnorm_json((result.stderr or "") + "\n" + (result.stdout or ""))
+    combined = (result.stderr or "") + "\n" + (result.stdout or "")
+    try:
+        return _parse_loudnorm_json(combined)
+    except RuntimeError as e:
+        raise RuntimeError(f"{e} (文件: {input_path}, ffmpeg输出: {combined})") from e
 
 
 def normalize_loudness(input_path, output_path, config: NormalizerConfig):

@@ -72,56 +72,35 @@ def test_sample_wav_quiet(sample_wav_quiet):
     assert float(abs(data).max()) < 0.2
 
 
-def test_test_config_has_full_audio_section(test_config):
+def test_test_config_has_full_pipeline_config(test_config):
     cfg = test_config
-    for key in (
-        "root_dir",
-        "recursive",
-        "use_lab_text_as_filename",
-        "split_and_merge",
-        "split",
-        "ser",
-        "asr",
-        "text",
-        "output",
-        "audio",
-    ):
-        assert key in cfg, f"missing top-level key: {key}"
+    assert cfg.root_dir == ""
+    assert cfg.recursive is True
+    assert cfg.use_lab_text_as_filename is False
+    assert cfg.normalizer_enabled is True
 
-    assert "audio" in cfg
-    audio = cfg["audio"]
-    for key in (
-        "target_sample_rate",
-        "target_channels",
-        "target_bit_depth",
-        "input_formats",
-        "trim_silence",
-        "loudness",
-        "dc_offset_removal",
-        "audit",
-        "clipping_detection",
-        "silence_ratio",
-        "snr_estimation",
-    ):
-        assert key in audio, f"missing audio key: {key}"
-    assert audio["target_sample_rate"] == 44100
-    assert audio["target_channels"] == 1
-    assert audio["target_bit_depth"] == 16
-    assert "wav" in audio["input_formats"]
+    norm = cfg.normalizer
+    assert norm.target_sample_rate == 44100
+    assert norm.target_channels == 1
+    assert norm.target_bit_depth == 16
+    assert "wav" in norm.input_formats
+    assert norm.trim_enabled is True
+    assert norm.loudness_enabled is True
+    assert norm.dc_offset_removal_enabled is True
+    assert norm.loudness_target_lufs == -16
+    assert norm.loudness_dual_pass is False
+    assert norm.dc_offset_threshold == 0.001
 
-    for sub in ("trim_silence", "loudness", "dc_offset_removal", "audit",
-                "clipping_detection", "silence_ratio", "snr_estimation"):
-        assert "enable" in audio[sub], f"missing 'enable' in audio.{sub}"
-    assert audio["loudness"]["target_lufs"] == -16
-    assert audio["trim_silence"]["top_db"] == 30
-    assert audio["dc_offset_removal"]["threshold"] == 0.001
-    assert audio["clipping_detection"]["clip_threshold"] == 0.99
-    assert audio["silence_ratio"]["warn_threshold"] == 0.4
-    assert audio["snr_estimation"]["warn_db"] == 20
+    assert cfg.ser.enabled is True
+    assert cfg.asr.funasr_model == "paraformer-zh"
+    assert cfg.text_t2s is True
+    assert cfg.output_jsonl is True
+    assert cfg.short_threshold == 3.0
+    assert cfg.long_threshold == 25.0
+    assert cfg.split.language == "zh"
 
-    assert cfg["split_and_merge"]["short_threshold"] == 3.0
-    assert cfg["split"]["language"] == "zh"
-    assert cfg["ser"]["enable"] is True
-    assert cfg["asr"]["funasr"]["model"] == "paraformer-zh"
-    assert cfg["text"]["t2s"] is True
-    assert cfg["output"]["jsonl_output"] is True
+    checks = cfg.checks
+    assert checks.audit.enable is True
+    assert checks.clipping.clip_threshold == 0.99
+    assert checks.silence_ratio.warn_threshold == 0.4
+    assert checks.snr.warn_db == 20

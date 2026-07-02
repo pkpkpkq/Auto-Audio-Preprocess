@@ -1,10 +1,22 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+# 直接依赖（源码中 import 的包）
 torch
-librosa
 numpy
+librosa
 whisperx
 opencc-python-reimplemented
 PyYAML
 transformers
 funasr
-pytest
 soundfile
+
+# 测试（pip install -r requirements.txt 时一并安装）
+pytest
+
+# whisperx 运行时加载 pyannote.audio，需 >=4.0 以兼容当前 torchaudio
+pyannote-audio>=4.0.0
+
+# 以下包为间接依赖，由上述直接依赖自动引入，无需显式列出：
+#   torchaudio, torchvision  → torch 的 CUDA 配套
+#   scipy, scikit-learn      → librosa / whisperx 依赖

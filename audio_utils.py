@@ -8,6 +8,20 @@ import os
 
 from opencc import OpenCC
 
+
+def setup_model_cache() -> str:
+    """将 HuggingFace 和 ModelScope 模型缓存统一重定向到项目根目录下的 local_model/。
+
+    设置 HF_HOME 和 MODELSCOPE_CACHE 两个环境变量。
+    幂等操作 — 多次调用安全。返回 local_model 目录的绝对路径。
+    """
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    local_model_dir = os.path.join(project_dir, "local_model")
+    os.makedirs(local_model_dir, exist_ok=True)
+    os.environ['HF_HOME'] = local_model_dir
+    os.environ['MODELSCOPE_CACHE'] = local_model_dir
+    return local_model_dir
+
 _t2s_converter = OpenCC('t2s')  # 繁体转简体
 
 def traditional_to_simplified(text, enabled=True):
@@ -189,3 +203,26 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"清理临时文件失败: {p}, 错误: {e}")
+
+
+def confirm_output_dir(base_output_dir: str) -> bool:
+    """Check if base_output_dir exists; if so, ask whether to overwrite.
+
+    Returns True if safe to proceed (dir doesn't exist or user chose to overwrite).
+    Returns False if user declined to overwrite — caller should exit.
+    When overwriting, deletes the entire base_output_dir with shutil.rmtree.
+    """
+    import shutil
+
+    if not os.path.isdir(base_output_dir):
+        return True
+
+    print(f"输出目录已存在: {base_output_dir}")
+    answer = input("是否覆盖已有输出? (y/N): ").strip().lower()
+    if answer != "y":
+        print("请更改输入文件夹名以避免输出冲突，然后重新运行。")
+        return False
+
+    shutil.rmtree(base_output_dir)
+    print(f"已删除旧输出目录: {base_output_dir}")
+    return True

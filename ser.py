@@ -8,13 +8,11 @@ import torch.nn.functional as F
 import logging
 from funasr import AutoModel
 from transformers import AutoConfig, Wav2Vec2FeatureExtractor, HubertPreTrainedModel, HubertModel
+from audio_utils import setup_model_cache
 
 logger = logging.getLogger(__name__)
 
-# 将 HuggingFace 模型缓存重定向到项目根目录的 local_model/ 下
-_project_dir = os.path.dirname(os.path.abspath(__file__))
-_local_model_dir = os.path.join(_project_dir, "local_model")
-os.environ['HF_HOME'] = _local_model_dir
+setup_model_cache()
 
 
 class HubertClassificationHead(nn.Module):
@@ -183,7 +181,6 @@ class _SenseVoiceBackend:
         self.language = config.sensevoice_language
         self.use_itn = config.sensevoice_use_itn
         self.ban_emo_unk = config.sensevoice_ban_emo_unk
-        self.vad_model = config.sensevoice_vad_model
         self.vad_max_single_segment_time = config.sensevoice_vad_max_single_segment_time  # ms
         self.device = self._resolve_device(config.device)
         self.model = None
@@ -201,7 +198,7 @@ class _SenseVoiceBackend:
         try:
             self.model = AutoModel(
                 model=self.model_id,
-                vad_model=self.vad_model,
+                vad_model="fsmn-vad",
                 vad_kwargs={"max_single_segment_time": self.vad_max_single_segment_time},
                 hub="ms",
                 device=self.device,

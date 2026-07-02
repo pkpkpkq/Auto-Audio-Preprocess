@@ -1,27 +1,16 @@
 import sys
-import yaml
 import os
 import logging
 
+from config_types import load_pipeline_config
 from processor import DatasetProcessor
-
-def load_config(config_path='config.yaml'):
-    """加载配置文件"""
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"配置文件不存在: {config_path}")
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
 
 def main():
     """主入口函数"""
     logger = logging.getLogger("tts_preprocess")
     try:
-        # 从 config.yaml 加载配置
-        config = load_config()
-        
-        # 直接将整个配置字典传递给处理器
-        processor = DatasetProcessor(config)
+        cfg = load_pipeline_config()
+        processor = DatasetProcessor(cfg)
         processor.run()
         
     except MemoryError as e:

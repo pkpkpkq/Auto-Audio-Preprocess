@@ -82,11 +82,12 @@ class _StubProcessor(processor.DatasetProcessor):
         self.root_dir = os.path.abspath(str(tmpdir))
         self.recursive = recursive
         self.folder_name = os.path.basename(self.root_dir.rstrip(os.sep))
-        self.audio_config = {
-            "input_formats": input_formats
-            if input_formats is not None
-            else ["wav", "flac", "mp3", "ogg", "aac", "m4a"]
-        }
+        from config_types import PipelineConfig, NormalizerConfig
+        self._cfg = PipelineConfig(
+            normalizer=NormalizerConfig(
+                input_formats=input_formats if input_formats is not None else ["wav", "flac", "mp3", "ogg", "aac", "m4a"]
+            ),
+        )
         self.ser_enabled = False
         self.ser_recognizer = None
         self.output_to_split_folder = True
@@ -117,7 +118,7 @@ class TestPickPrimaryAudio:
             "dirpath": str(d),
         }
         chosen = processor.DatasetProcessor._pick_primary_audio(
-            "test", str(d), extmap, proc.audio_config
+            "test", str(d), extmap, proc._cfg.normalizer.input_formats
         )
         assert chosen is not None and chosen.endswith(".wav"), chosen
 
@@ -133,7 +134,7 @@ class TestPickPrimaryAudio:
             "dirpath": str(d),
         }
         chosen = processor.DatasetProcessor._pick_primary_audio(
-            "test", str(d), extmap, proc.audio_config
+            "test", str(d), extmap, proc._cfg.normalizer.input_formats
         )
         assert chosen is not None and chosen.endswith(".flac"), chosen
 
@@ -143,7 +144,7 @@ class TestPickPrimaryAudio:
         proc = _StubProcessor(tmp_path)
         extmap = {".lab": "test.lab", "dirpath": str(d)}
         chosen = processor.DatasetProcessor._pick_primary_audio(
-            "test", str(d), extmap, proc.audio_config
+            "test", str(d), extmap, proc._cfg.normalizer.input_formats
         )
         assert chosen is None
 
