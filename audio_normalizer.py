@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -9,6 +10,13 @@ import wave
 
 from config_types import NormalizerConfig
 from audio_utils import bit_depth_to_ffmpeg_codec
+
+logger = logging.getLogger(__name__)
+
+# EBU R128 集成响度测量所需的最小音频时长 (秒)
+_LOUDNORM_MIN_DURATION = 0.4
+# 短音频 pad 目标时长 (秒)，留 100ms 余量
+_LOUDNORM_PAD_DURATION = 0.5
 
 
 def _format_number(value):
@@ -160,10 +168,34 @@ def _measure_loudness(input_path, config: NormalizerConfig):
         f"LRA={_format_number(values['lra'])}:"
         f"TP={_format_number(values['tp'])}:print_format=json"
     )
+
+    # 检测音频时长，过短时 pad 到最小长度以避免 EBU R128 返回 -inf
+    measure_path = input_path
+    padded_tmp = None
+    try:
+        import soundfile as sf
+        info = sf.info(input_path)
+        duration = info.duration
+        if duration < _LOUDNORM_MIN_DURATION:
+            import numpy as np
+            data, sr = sf.read(input_path, dtype="float32")
+            pad_samples = int(_LOUDNORM_PAD_DURATION * sr) - len(data)
+            if pad_samples > 0:
+                padded = np.concatenate([data, np.zeros(pad_samples, dtype=data.dtype)])
+                padded_tmp = input_path + ".loudnorm_pad.wav"
+                sf.write(padded_tmp, padded, sr, subtype="PCM_16")
+                measure_path = padded_tmp
+                logger.warning(
+                    f"音频过短 ({duration:.3f}s < {_LOUDNORM_MIN_DURATION}s)，"
+                    f"已 pad 到 {_LOUDNORM_PAD_DURATION}s 进行响度测量: {input_path}"
+                )
+    except Exception:
+        pass  # 获取时长失败时不 pad，让后续 ffmpeg 自行处理
+
     cmd = [
         "ffmpeg", "-y", "-hide_banner",
         "-loglevel", "info",
-        "-i", input_path,
+        "-i", measure_path,
         "-af", loudnorm_filter,
         "-f", "null", "-",
     ]
@@ -175,6 +207,9 @@ def _measure_loudness(input_path, config: NormalizerConfig):
     except subprocess.CalledProcessError as e:
         detail = e.stderr or e.stdout or str(e)
         raise RuntimeError(f"ffmpeg loudnorm 测量失败: {input_path}: {detail}") from e
+    finally:
+        if padded_tmp and os.path.exists(padded_tmp):
+            os.remove(padded_tmp)
 
     combined = (result.stderr or "") + "\n" + (result.stdout or "")
     try:

@@ -130,6 +130,32 @@ class TestBatchSilenceRatio:
         assert "test1.wav" in content
         assert "0.1" in content
 
+    def test_write_silence_ratio_report_sorting_and_format(self, tmp_path):
+        data = [
+            {"wav_path": "/path/to/ok_b.wav", "silence_ratio": 0.1, "silence_status": "ok"},
+            {"wav_path": "/path/to/reject_b.wav", "silence_ratio": 0.9, "silence_status": "reject"},
+            {"wav_path": "/path/to/warn_b.wav", "silence_ratio": 0.5, "silence_status": "warn"},
+            {"wav_path": "/path/to/ok_a.wav", "silence_ratio": 0.05, "silence_status": "ok"},
+            {"wav_path": "/path/to/reject_a.wav", "silence_ratio": 0.8, "silence_status": "reject"},
+            {"wav_path": "/path/to/warn_a.wav", "silence_ratio": 0.45, "silence_status": "warn"},
+        ]
+        out_path = str(tmp_path / "！静默比例报告.txt")
+        write_silence_ratio_report(data, out_path)
+        content = open(out_path, encoding="utf-8").read()
+        lines = [line for line in content.splitlines() if line]
+        detail_idx = lines.index("--- 明细 ---")
+        detail_lines = lines[detail_idx + 1:]
+
+        expected = [
+            "reject_a.wav  静默比例=0.8 (拒绝)",
+            "reject_b.wav  静默比例=0.9 (拒绝)",
+            "warn_a.wav  静默比例=0.45 (警告)",
+            "warn_b.wav  静默比例=0.5 (警告)",
+            "ok_a.wav  静默比例=0.05 (正常)",
+            "ok_b.wav  静默比例=0.1 (正常)",
+        ]
+        assert detail_lines == expected
+
 
 class TestBatchSnr:
     def test_batch_check_returns_list(self, tmp_path, test_config):
@@ -183,6 +209,32 @@ class TestBatchSnr:
         assert "汇总" in content
         assert "test1.wav" in content
         assert "30.0" in content
+
+    def test_write_snr_report_sorting_and_format(self, tmp_path):
+        data = [
+            {"wav_path": "/path/to/ok_b.wav", "snr": 35.0, "snr_status": "ok"},
+            {"wav_path": "/path/to/reject_b.wav", "snr": 8.0, "snr_status": "reject"},
+            {"wav_path": "/path/to/warn_b.wav", "snr": 18.0, "snr_status": "warn"},
+            {"wav_path": "/path/to/ok_a.wav", "snr": 30.0, "snr_status": "ok"},
+            {"wav_path": "/path/to/reject_a.wav", "snr": 5.0, "snr_status": "reject"},
+            {"wav_path": "/path/to/warn_a.wav", "snr": 16.0, "snr_status": "warn"},
+        ]
+        out_path = str(tmp_path / "！SNR报告.txt")
+        write_snr_report(data, out_path)
+        content = open(out_path, encoding="utf-8").read()
+        lines = [line for line in content.splitlines() if line]
+        detail_idx = lines.index("--- 明细 ---")
+        detail_lines = lines[detail_idx + 1:]
+
+        expected = [
+            "reject_a.wav  SNR=5.0dB (拒绝)",
+            "reject_b.wav  SNR=8.0dB (拒绝)",
+            "warn_a.wav  SNR=16.0dB (警告)",
+            "warn_b.wav  SNR=18.0dB (警告)",
+            "ok_a.wav  SNR=30.0dB (正常)",
+            "ok_b.wav  SNR=35.0dB (正常)",
+        ]
+        assert detail_lines == expected
 
 
 class TestRunCheckPipeline:

@@ -13,7 +13,7 @@
 ```mermaid
 graph TD
     A[输入扫描: 音频 + .lab 配对] --> B["[Stage: after_scan]"]
-    B --> C["音频归一化 (Normalize) <br> 格式/高通去直流/静音修剪/LUFS响度"]
+    B --> C["音频归一化 (Normalize) <br> 格式/高通去直流/LUFS响度/静音修剪"]
     C --> D["[Stage: after_normalize]"]
     D --> E[时长分类: 短/正常/长]
     E --> F["[Stage: after_classify]"]
@@ -127,7 +127,7 @@ checks:
 ```
 
 ### 4.2 音频归一化 (`audio:`)
-控制音频的重采样、声道合并、位深归一化、首尾静音切除以及 LUFS 感知响度归一化。
+控制音频的重采样、声道合并、位深归一化、LUFS 感知响度归一化以及首尾静音切除。
 > **注意**：如果配置文件中缺失整个 `audio:` 配置段，程序将不执行任何音频修改（退化为旧版的只读/纯分析模式）。
 
 ```yaml

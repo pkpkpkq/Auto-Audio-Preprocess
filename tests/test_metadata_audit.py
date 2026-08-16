@@ -183,6 +183,32 @@ class TestBatchClipping:
         assert "削波" in content
         assert "汇总" in content
 
+    def test_write_clipping_report_sorting_and_format(self, tmp_path):
+        data = [
+            {"wav_path": "/path/to/ok_b.wav", "clip_percentage": 0.0, "peak_dbfs": -3.0, "clipping_status": "ok"},
+            {"wav_path": "/path/to/reject_b.wav", "clip_percentage": 10.0, "peak_dbfs": 0.0, "clipping_status": "reject"},
+            {"wav_path": "/path/to/warn_b.wav", "clip_percentage": 2.0, "peak_dbfs": -0.1, "clipping_status": "warn"},
+            {"wav_path": "/path/to/ok_a.wav", "clip_percentage": 0.0, "peak_dbfs": -6.0, "clipping_status": "ok"},
+            {"wav_path": "/path/to/reject_a.wav", "clip_percentage": 8.0, "peak_dbfs": 0.0, "clipping_status": "reject"},
+            {"wav_path": "/path/to/warn_a.wav", "clip_percentage": 1.5, "peak_dbfs": -0.5, "clipping_status": "warn"},
+        ]
+        out_path = str(tmp_path / "！削波报告.txt")
+        write_clipping_report(data, out_path)
+        content = open(out_path, encoding="utf-8").read()
+        lines = [line for line in content.splitlines() if line]
+        detail_idx = lines.index("--- 明细 ---")
+        detail_lines = lines[detail_idx + 1:]
+
+        expected = [
+            "reject_a.wav  削波比例=8.0%  峰值=0.0dBFS (拒绝)",
+            "reject_b.wav  削波比例=10.0%  峰值=0.0dBFS (拒绝)",
+            "warn_a.wav  削波比例=1.5%  峰值=-0.5dBFS (警告)",
+            "warn_b.wav  削波比例=2.0%  峰值=-0.1dBFS (警告)",
+            "ok_a.wav  削波比例=0.0%  峰值=-6.0dBFS (正常)",
+            "ok_b.wav  削波比例=0.0%  峰值=-3.0dBFS (正常)",
+        ]
+        assert detail_lines == expected
+
     def test_batch_disabled(self, sample_wav_clipped):
         cfg = ClippingCheckConfig(enable=False)
         entries = [AudioEntry(path=str(sample_wav_clipped), lab_text="", duration=0.0)]

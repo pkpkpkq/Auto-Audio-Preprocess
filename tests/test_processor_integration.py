@@ -177,7 +177,7 @@ def test_full_pipeline_with_audio_preprocessing_enabled(tmp_path, monkeypatch):
     assert (out_dir / "！静默比例.after_normalize.txt").exists()
     assert (tmp_path / "output" / input_dir.name / f"{input_dir.name}.list").exists()
     assert _md5(source) == before
-    assert calls == ["audit", "normalize_format", "trim_silence", "normalize_loudness", "clipping", "silence_ratio", "snr"]
+    assert calls == ["audit", "normalize_format", "normalize_loudness", "trim_silence", "clipping", "silence_ratio", "snr"]
     _write_evidence("task-9-full-pipeline.txt", f"PASS full pipeline: {wavs[0]} calls={calls}\n")
 
 

@@ -27,6 +27,19 @@ def _write_report(lines: list[str], output_path: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+_STATUS_SORT_ORDER = {"reject": 0, "warn": 1, "ok": 2}
+
+
+def _sort_report_items(items: list[dict], status_key: str) -> list[dict]:
+    return sorted(
+        items,
+        key=lambda x: (
+            _STATUS_SORT_ORDER.get(x.get(status_key, ""), 99),
+            os.path.basename(x.get("wav_path", "") or "unknown"),
+        ),
+    )
+
+
 def compute_silence_ratio(input_path: str, config: SilenceRatioCheckConfig) -> dict:
     top_db = config.top_db
     warn_threshold = config.warn_threshold
@@ -154,8 +167,8 @@ def write_silence_ratio_report(data: list[dict], output_path: str, warn_threshol
     lines.append("")
     lines.append("--- 明细 ---")
 
-    for item in data:
-        wav = os.path.basename(item.get("wav_path", "unknown"))
+    for item in _sort_report_items(data, "silence_status"):
+        wav = os.path.basename(item.get("wav_path", "unknown") or "unknown")
         sr_val = item.get("silence_ratio", "N/A")
         status = item.get("silence_status", "N/A")
         if status == "ok":
@@ -231,8 +244,8 @@ def write_snr_report(data: list[dict], output_path: str, warn_db: float = 20.0, 
     lines.append("")
     lines.append("--- 明细 ---")
 
-    for item in data:
-        wav = os.path.basename(item.get("wav_path", "unknown"))
+    for item in _sort_report_items(data, "snr_status"):
+        wav = os.path.basename(item.get("wav_path", "unknown") or "unknown")
         snr_val = item.get("snr", "N/A")
         status = item.get("snr_status", "N/A")
         if status == "ok":
@@ -462,8 +475,8 @@ def write_clipping_report(clipping_data: list[dict], output_path: str, warn_thre
     lines.append("")
     lines.append("--- 明细 ---")
 
-    for item in clipping_data:
-        wav = os.path.basename(item.get("wav_path", "unknown"))
+    for item in _sort_report_items(clipping_data, "clipping_status"):
+        wav = os.path.basename(item.get("wav_path", "unknown") or "unknown")
         pct = item.get("clip_percentage", 0)
         peak = item.get("peak_dbfs", "N/A")
         status = item.get("clipping_status", "N/A")
@@ -475,7 +488,7 @@ def write_clipping_report(clipping_data: list[dict], output_path: str, warn_thre
             status_str = "拒绝"
         else:
             status_str = status
-        lines.append(f"{wav}  {status_str}  削波比例={pct}%  峰值={peak}dBFS")
+        lines.append(f"{wav}  削波比例={pct}%  峰值={peak}dBFS ({status_str})")
     _write_report(lines, output_path)
 
 

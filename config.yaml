@@ -9,7 +9,7 @@
 #      └── 质检插桩阶段: after_scan (执行格式审计 audit)
 #
 #   2. 音频归一化 [第 3 节: audio]
-#      - 逐条处理写入 temp_dir (原文件不动): 格式转换+去直流 → 静音修剪 → LUFS响度
+#      - 逐条处理写入 temp_dir (原文件不动): 格式转换+去直流 → LUFS响度 → 静音修剪
 #      └── 质检插桩阶段: after_normalize (削波 clipping / 静默比例 silence_ratio / 信噪比 snr)
 #
 #   3. 时长分流 [第 5 节: split_and_merge.short/long_threshold]
@@ -187,8 +187,8 @@ asr:
 # 3. 音频归一化 (Audio Normalization)
 # 对扫描后的所有音频执行标准化处理 (逐条处理写入 temp_dir，原文件不动):
 #   3a. 格式转换与采样率统一 + 直流偏移消除 (DC Offset Removal)
-#   3b. 首尾静音修剪 (Silence Trimming)
-#   3c. LUFS 响度归一化 (Loudness Normalization)
+#   3b. LUFS 响度归一化 (Loudness Normalization)
+#   3c. 首尾静音修剪 (Silence Trimming)
 # 缺少 audio: 段时，管道行为与旧版一致 (不执行预处理)
 # ============================================================
 audio:
@@ -232,49 +232,7 @@ audio:
                                # 0.001 = 0.1% 全量程; 几乎所有录音都有微量 DC 偏移
                                # 低于此值表示无显著 DC 偏移，跳过以节省处理时间
 
-  # ── 3b. 首尾静音修剪 ──
-  # 使用 librosa.effects.trim 检测首尾静音段并裁剪
-  # 修剪后通过 soundfile 写出 (保证采样率无损)
-  trim_silence:
-    enabled: true
-    top_db: 30                 # 低于峰值此 dB 值的帧视为"静音" (librosa 默认 60dB)
-                               # ── 判断方法: 相对峰值门限法 (Relative Peak Thresholding) ──
-                               # 1. 按 frame_length/hop_length 分帧，计算每帧 RMS 振幅 (dB)
-                               # 2. 取整段音频的最大帧振幅作为参考 ref (0 dB)
-                               # 3. 每帧振幅 < (ref - top_db) → 判为静音
-                               #    例: top_db=30, 峰值=0dB → 低于 -30dB 的帧为静音
-                               # ── 为什么用相对门限而非绝对门限如 -40 dBFS ──
-                               # 绝对门限: 小声录音 (语音 -35dBFS) 会被误判为静音
-                               # 相对门限: 自动适配每段音频响度, 无论大声/小声都能正确区分
-                               # 局限: 不同录音响度差异大时标准不统一; 本管道采用
-                               #        先修剪后归一化的顺序, 修剪时各文件响度未统一,
-                               #        但对多数已响度相近的数据集影响极小
-                               # ── 方向 ──
-                               # 值越小 → 越容易判定为静音 → 裁剪更积极 (保留更少弱音)
-                               # 值越大 → 越难判定为静音 → 裁剪更保守 (保留更多弱音)
-                               # TTS=25-30 / SVC=25-28
-                               # So-VITS-SVC-fork 默认: top_db=30
-                               # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB, 约等效 top_db=40
-                               # RVC: threshold=-42dB
-                               # ⚠️ SVC 歌唱需高低值: 过度修剪会切掉尾音衰减、气声和弱音延音
-    frame_length: 2048         # 分析帧长 (采样点数)
-                               # 2048 = 标准值 (约 46ms @44.1kHz, 约 64ms @32kHz)
-                               # librosa.effects.trim 默认值，无需调整
-    hop_length: 512             # 帧移步长 (采样点数)
-                               # 512 = 标准值 (约 11.6ms @44.1kHz)
-                               # 与 STFT 分析和多数 TTS 模型的 hop_size 一致
-    min_trim_ms: 100           # 首尾静音至少多少毫秒才值得修剪
-                               # TTS=100 / SVC=300-500
-                               # 低于此值的静音不处理，避免微小静音导致的过度裁剪
-                               # SVC 需更大值以保护尾音的自然衰减和混响尾声
-    keep_padding_ms: 50        # 修剪后前后各保留的缓冲时长 (毫秒)
-                               # TTS=50 / SVC=300-500
-                               # 防止切得太干净导致起止处的爆音 (click/pop)
-                               # SVC 歌唱需要更多缓冲以保留混响尾声 (~300-800ms)
-                               # openvpi/audio-slicer 默认 max_sil_kept=500ms
-                               # RVC 默认 max_sil_kept=5000ms (5s，较宽裕)
-
-  # ── 3c. LUFS 响度归一化 ──
+  # ── 3b. LUFS 响度归一化 ──
   # 基于 EBU R128 标准 (ITU-R BS.1770)，使用 ffmpeg loudnorm 滤波器
   # 确保数据集内所有音频的感知响度一致
   loudness:
@@ -298,7 +256,8 @@ audio:
                                #   单声道权威参考是 -19 LUFS (Google Assistant)
                                #   -16 是立体声标准，单声道下偏响但可接受
                                # ⚠️ So-VITS-SVC 默认响应度匹配到 0dBFS，官方明确警告会导致
-                               #   "sonic boom" 并推荐使用 Adobe Audition 替代
+                               #   "sonic boom" 并推荐使用 Adobe Audition 替代，使用本软件
+                               #   响度归一后应关闭So-VITS-SVC自带的响度匹配
     true_peak: -1.5            # True Peak 限制 (dBTP, 真实峰值)
                                # ┌──────────────────────┬──────────┐
                                # │ 标准                 │ dBTP     │
@@ -340,6 +299,48 @@ audio:
                                #         精度: ±0.1 LU; 速度: 约 2× 编码时间
                                # TTS/SVC 推荐: true (保留自然动态，避免压缩伪影)
                                # 参考: https://ffmpeg-cookbook.com/en/articles/loudness-normalization/
+
+  # ── 3c. 首尾静音修剪 ──
+  # 使用 librosa.effects.trim 检测首尾静音段并裁剪
+  # 修剪后通过 soundfile 写出 (保证采样率无损)
+  trim_silence:
+    enabled: true
+    top_db: 30                 # 低于峰值此 dB 值的帧视为"静音" (librosa 默认 60dB)
+                               # ── 判断方法: 相对峰值门限法 (Relative Peak Thresholding) ──
+                               # 1. 按 frame_length/hop_length 分帧，计算每帧 RMS 振幅 (dB)
+                               # 2. 取整段音频的最大帧振幅作为参考 ref (0 dB)
+                               # 3. 每帧振幅 < (ref - top_db) → 判为静音
+                               #    例: top_db=30, 峰值=0dB → 低于 -30dB 的帧为静音
+                               # ── 为什么用相对门限而非绝对门限如 -40 dBFS ──
+                               # 绝对门限: 小声录音 (语音 -35dBFS) 会被误判为静音
+                               # 相对门限: 自动适配每段音频响度, 无论大声/小声都能正确区分
+                               # 由于不同录音响度差异大时标准不统一, 本管道采用
+                               #     先归一化后修剪的顺序, 响度统一后再修剪首尾静音,
+                               #     这同时避免修剪后音频过短导致 EBU R128 测量失败
+                               # ── 方向 ──
+                               # 值越小 → 越容易判定为静音 → 裁剪更积极 (保留更少弱音)
+                               # 值越大 → 越难判定为静音 → 裁剪更保守 (保留更多弱音)
+                               # TTS=25-30 / SVC=25-28
+                               # So-VITS-SVC-fork 默认: top_db=30
+                               # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB, 约等效 top_db=40
+                               # RVC: threshold=-42dB
+                               # ⚠️ SVC 歌唱需高低值: 过度修剪会切掉尾音衰减、气声和弱音延音
+    frame_length: 2048         # 分析帧长 (采样点数)
+                               # 2048 = 标准值 (约 46ms @44.1kHz, 约 64ms @32kHz)
+                               # librosa.effects.trim 默认值，无需调整
+    hop_length: 512             # 帧移步长 (采样点数)
+                               # 512 = 标准值 (约 11.6ms @44.1kHz)
+                               # 与 STFT 分析和多数 TTS 模型的 hop_size 一致
+    min_trim_ms: 100           # 首尾静音至少多少毫秒才值得修剪
+                               # TTS=100 / SVC=300-500
+                               # 低于此值的静音不处理，避免微小静音导致的过度裁剪
+                               # SVC 需更大值以保护尾音的自然衰减和混响尾声
+    keep_padding_ms: 50        # 修剪后前后各保留的缓冲时长 (毫秒)
+                               # TTS=50 / SVC=300-500
+                               # 防止切得太干净导致起止处的爆音 (click/pop)
+                               # SVC 歌唱需要更多缓冲以保留混响尾声 (~300-800ms)
+                               # openvpi/audio-slicer 默认 max_sil_kept=500ms
+                               # RVC 默认 max_sil_kept=5000ms (5s，较宽裕)
 
 
 # ============================================================

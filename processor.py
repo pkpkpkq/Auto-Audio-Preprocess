@@ -517,6 +517,15 @@ class DatasetProcessor:
                 entry.duration = au.get_audio_duration_seconds(normalized_path)
                 current_path = normalized_path
 
+            if loudness_enabled:
+                loud_stem = os.path.splitext(os.path.basename(current_path))[0]
+                loud_path = os.path.join(self.temp_dir, f"loud_{index}_{loud_stem}.wav")
+                norm.normalize_loudness(current_path, loud_path, self._norm_config)
+                if os.path.exists(loud_path):
+                    entry.path = loud_path
+                    entry.duration = au.get_audio_duration_seconds(loud_path)
+                    current_path = loud_path
+
             if trim_enabled:
                 trim_stem = os.path.splitext(os.path.basename(current_path))[0]
                 trimmed_path = os.path.join(self.temp_dir, f"trim_{index}_{trim_stem}.wav")
@@ -525,14 +534,6 @@ class DatasetProcessor:
                     entry.path = trimmed_path
                     entry.duration = au.get_audio_duration_seconds(trimmed_path)
                     current_path = trimmed_path
-
-            if loudness_enabled:
-                loud_stem = os.path.splitext(os.path.basename(current_path))[0]
-                loud_path = os.path.join(self.temp_dir, f"loud_{index}_{loud_stem}.wav")
-                norm.normalize_loudness(current_path, loud_path, self._norm_config)
-                if os.path.exists(loud_path):
-                    entry.path = loud_path
-                    entry.duration = au.get_audio_duration_seconds(loud_path)
 
         return all_entries
 

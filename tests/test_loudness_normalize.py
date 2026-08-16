@@ -105,3 +105,35 @@ def test_loudness_output_sample_rate_pinned(tmp_path, sample_wav_22k_mono, test_
     assert sr == cfg.target_sample_rate
     assert ch == cfg.target_channels
     assert sw == cfg.target_bit_depth // 8
+
+
+def test_very_short_file_dual_pass_with_padding(tmp_path, test_config, caplog):
+    """测试极短音频 (<400ms) 在双 pass 模式下通过 padding 正常完成响度归一化。"""
+    import logging
+
+    sr = 44100
+    duration = 0.2  # 200ms, 远低于 400ms EBU R128 最小窗口
+    t = np.linspace(0.0, duration, int(sr * duration), endpoint=False)
+    data = (np.sin(2.0 * np.pi * 440.0 * t) * 0.3).astype(np.float32)
+    short_wav = tmp_path / "very_short.wav"
+    output = tmp_path / "very_short_loud.wav"
+    sf.write(str(short_wav), data, sr, subtype="PCM_16")
+
+    cfg = _loudness_config(test_config, target_lufs=-16, dual_pass=True)
+
+    with caplog.at_level(logging.WARNING, logger="audio_normalizer"):
+        normalize_loudness(short_wav, output, cfg)
+
+    assert output.exists()
+    assert output.stat().st_size > 0
+
+    # 验证记录了 padding 警告
+    pad_warnings = [r for r in caplog.records if "pad" in r.message.lower() or "pad" in r.message]
+    assert len(pad_warnings) >= 1, "应记录短音频 padding 警告"
+
+    _write_evidence(
+        "task-5-dual-pass-short-padding.txt",
+        f"input={short_wav}\noutput={output}\n"
+        f"output_exists={output.exists()}\noutput_size={output.stat().st_size}\n"
+        f"warning_logged={len(pad_warnings) >= 1}\n",
+    )
