@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+from functools import lru_cache
 from funasr import AutoModel
 from transformers import AutoConfig, Wav2Vec2FeatureExtractor, HubertPreTrainedModel, HubertModel
 from audio_utils import setup_model_cache
@@ -13,6 +14,46 @@ from audio_utils import setup_model_cache
 logger = logging.getLogger(__name__)
 
 setup_model_cache()
+
+
+# ── Backend models (lru_cache + unload) ─────────────────────────
+# ponytail: 三个 backend getter 一刀 cache_clear；本项目单进程串行 + 单 backend active 时无副作用。
+# 切多 backend 并发 / hot-reload 时升级到 refcount registry。
+
+@lru_cache(maxsize=1)
+def _get_hubert(model_id, device):
+    """加载 HuBERT SER 模型三件套 (config, processor, model)。"""
+    config = AutoConfig.from_pretrained(model_id)
+    processor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
+    model = HubertForSpeechClassification.from_pretrained(model_id, config=config)
+    model.to(device)
+    model.eval()
+    return config, processor, model
+
+
+@lru_cache(maxsize=1)
+def _get_emotion2vec(model_id, device):
+    return AutoModel(model=model_id, hub="ms", device=device)
+
+
+@lru_cache(maxsize=1)
+def _get_sensevoice(model_id, device, vad_max_ms):
+    return AutoModel(
+        model=model_id,
+        vad_model="fsmn-vad",
+        vad_kwargs={"max_single_segment_time": vad_max_ms},
+        hub="ms",
+        device=device,
+    )
+
+
+def unload_models():
+    """释放所有 SER 后端模型缓存。"""
+    _get_hubert.cache_clear()
+    _get_emotion2vec.cache_clear()
+    _get_sensevoice.cache_clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class HubertClassificationHead(nn.Module):
@@ -66,9 +107,6 @@ class _HubertBackend:
         self.device = self._resolve_device(config.device)
         self.sample_rate = 16000  # Hz, from model card
         self.max_duration = 6  # seconds, from model card
-        self.model_config = None
-        self.processor = None
-        self.model = None
 
     @staticmethod
     def _resolve_device(device_setting):
@@ -76,28 +114,11 @@ class _HubertBackend:
             return "cuda" if torch.cuda.is_available() else "cpu"
         return device_setting
 
-    def _load_model(self):
-        if self.model is not None:
-            return
-        logger.info(f"加载 HuBERT SER 模型 '{self.model_id}' 到设备 '{self.device}'...")
-        try:
-            self.model_config = AutoConfig.from_pretrained(self.model_id)
-            self.processor = Wav2Vec2FeatureExtractor.from_pretrained(self.model_id)
-            self.model = HubertForSpeechClassification.from_pretrained(self.model_id, config=self.model_config)
-            self.model.to(self.device)
-            self.model.eval()
-            logger.info("HuBERT SER 模型加载完成。")
-        except Exception as e:
-            logger.error(f"HuBERT SER 模型加载失败: {e}", exc_info=True)
-            raise
-
     def predict(self, audio_path):
-        self._load_model()
-        if self.model is None or self.processor is None:
-            raise RuntimeError("HuBERT SER 模型未加载。")
+        _, processor, model = _get_hubert(self.model_id, self.device)
 
         speech, sr = librosa.load(audio_path, sr=self.sample_rate)
-        input_values = self.processor(
+        input_values = processor(
             speech,
             padding="max_length",
             truncation=True,
@@ -109,7 +130,7 @@ class _HubertBackend:
         input_values = input_values.to(self.device)
 
         with torch.no_grad():
-            logits = self.model(input_values)
+            logits = model(input_values)
 
         predicted_id = torch.argmax(logits, dim=1).item()
         return self.EMOTION_MAP.get(predicted_id, "unknown")
@@ -123,7 +144,6 @@ class _Emotion2VecBackend:
         self.granularity = config.emotion2vec_granularity
         self.safe_max_duration = config.emotion2vec_safe_max_duration  # seconds
         self.device = self._resolve_device(config.device)
-        self.model = None
 
     @staticmethod
     def _resolve_device(device_setting):
@@ -131,20 +151,9 @@ class _Emotion2VecBackend:
             return "cuda" if torch.cuda.is_available() else "cpu"
         return device_setting
 
-    def _load_model(self):
-        if self.model is not None:
-            return
-        logger.info(f"加载 emotion2vec SER 模型 '{self.model_id}'...")
-        try:
-            self.model = AutoModel(model=self.model_id, hub="ms", device=self.device)
-            logger.info("emotion2vec SER 模型加载完成。")
-        except Exception as e:
-            logger.error(f"emotion2vec SER 模型加载失败: {e}", exc_info=True)
-            raise
-
     def predict(self, audio_path):
-        self._load_model()
-        res = self.model.generate(
+        model = _get_emotion2vec(self.model_id, self.device)
+        res = model.generate(
             audio_path,
             output_dir="./outputs",
             granularity=self.granularity,
@@ -183,7 +192,6 @@ class _SenseVoiceBackend:
         self.ban_emo_unk = config.sensevoice_ban_emo_unk
         self.vad_max_single_segment_time = config.sensevoice_vad_max_single_segment_time  # ms
         self.device = self._resolve_device(config.device)
-        self.model = None
 
     @staticmethod
     def _resolve_device(device_setting):
@@ -191,26 +199,9 @@ class _SenseVoiceBackend:
             return "cuda" if torch.cuda.is_available() else "cpu"
         return device_setting
 
-    def _load_model(self):
-        if self.model is not None:
-            return
-        logger.info(f"加载 SenseVoice SER 模型 '{self.model_id}'...")
-        try:
-            self.model = AutoModel(
-                model=self.model_id,
-                vad_model="fsmn-vad",
-                vad_kwargs={"max_single_segment_time": self.vad_max_single_segment_time},
-                hub="ms",
-                device=self.device,
-            )
-            logger.info("SenseVoice SER 模型加载完成。")
-        except Exception as e:
-            logger.error(f"SenseVoice SER 模型加载失败: {e}", exc_info=True)
-            raise
-
     def predict(self, audio_path):
-        self._load_model()
-        res = self.model.generate(
+        model = _get_sensevoice(self.model_id, self.device, self.vad_max_single_segment_time)
+        res = model.generate(
             audio_path,
             output_dir="./outputs",
             language=self.language,
@@ -295,6 +286,11 @@ class SpeechEmotionRecognizer:
 
 
 if __name__ == '__main__':
+    # Ponytail smoke check: unload API surface + cache_clear hooks must be callable + work on empty caches.
+    assert callable(unload_models)
+    assert all(callable(g.cache_clear) for g in (_get_hubert, _get_emotion2vec, _get_sensevoice))
+    unload_models()  # no-op on empty caches; fails if any underlying cache_clear breaks
+
     from config_types import SerConfig
 
     test_config = SerConfig(backend="hubert")

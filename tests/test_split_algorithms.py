@@ -20,6 +20,13 @@ sys.modules.setdefault("opencc", opencc_stub)
 
 from audio_splitter import plan_splits, adjust_punctuation
 
+# Ponytail pollux: 顶部 stub 的 torch/librosa 只为让 plan_splits/adjust_punctuation
+# 在轻 collection 下加载 audio_splitter；这一步完成后立即清理 sys.modules 占位，
+# 防止污染后续 test_*_silence / test_quality_metrics 等真实使用 torch+librosa 的模块。
+sys.modules.pop("torch", None)
+sys.modules.pop("librosa", None)
+sys.modules.pop("whisperx", None)
+
 
 class TestPlanSplits:
     def test_no_split_needed_when_within_range(self):

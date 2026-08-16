@@ -494,13 +494,18 @@ def run_check_pipeline(
     reject_records: list[tuple[str, str, str, str]] = []
 
     check_specs = [
-        ("audit", check_config.audit, audit_audio_metadata, "格式审计", None),
-        ("clipping", check_config.clipping, batch_detect_clipping, "削波检测", "clipping_status"),
-        ("silence_ratio", check_config.silence_ratio, batch_check_silence_ratio, "静默比例", "silence_status"),
-        ("snr", check_config.snr, batch_check_snr, "SNR", "snr_status"),
+        # audit — 返回 dict 而非 list[dict]，无 reject_action，单独处理
+        ("audit", check_config.audit, audit_audio_metadata, "格式审计", None, None, None, None),
+        # 统一定义: (name, cfg, batch_fn, report_name, status_key, write_fn, warn_key, reject_key)
+        ("clipping", check_config.clipping, batch_detect_clipping, "削波检测", "clipping_status",
+         write_clipping_report, "warn_threshold", "reject_threshold"),
+        ("silence_ratio", check_config.silence_ratio, batch_check_silence_ratio, "静默比例", "silence_status",
+         write_silence_ratio_report, "warn_threshold", "reject_threshold"),
+        ("snr", check_config.snr, batch_check_snr, "SNR", "snr_status",
+         write_snr_report, "warn_db", "reject_db"),
     ]
 
-    for check_name, check_cfg, batch_func, report_name, status_key in check_specs:
+    for check_name, check_cfg, batch_func, report_name, status_key, write_fn, warn_key, reject_key in check_specs:
         if not check_cfg.enable:
             continue
         if stage not in check_cfg.run_at:
@@ -512,29 +517,14 @@ def run_check_pipeline(
         if check_name == "audit":
             result = batch_func(entries, check_cfg)
             write_audit_report(result, report_path)
-        elif check_name == "clipping":
+        else:
             results = batch_func(entries, check_cfg)
-            write_clipping_report(results, report_path,
-                                  warn_threshold=check_cfg.warn_threshold,
-                                  reject_threshold=check_cfg.reject_threshold)
-            if is_last_run:
-                for r in results:
-                    if r.get(status_key) == "reject":
-                        reject_records.append((r.get("wav_path", ""), check_name, check_cfg.reject_action, stage))
-        elif check_name == "silence_ratio":
-            results = batch_func(entries, check_cfg)
-            write_silence_ratio_report(results, report_path,
-                                       warn_threshold=check_cfg.warn_threshold,
-                                       reject_threshold=check_cfg.reject_threshold)
-            if is_last_run:
-                for r in results:
-                    if r.get(status_key) == "reject":
-                        reject_records.append((r.get("wav_path", ""), check_name, check_cfg.reject_action, stage))
-        elif check_name == "snr":
-            results = batch_func(entries, check_cfg)
-            write_snr_report(results, report_path,
-                             warn_db=check_cfg.warn_db,
-                             reject_db=check_cfg.reject_db)
+            kwargs = {}
+            if warn_key:
+                kwargs[warn_key] = getattr(check_cfg, warn_key)
+            if reject_key:
+                kwargs[reject_key] = getattr(check_cfg, reject_key)
+            write_fn(results, report_path, **kwargs)
             if is_last_run:
                 for r in results:
                     if r.get(status_key) == "reject":

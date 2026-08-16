@@ -161,23 +161,11 @@ class AudioSplitter:
         self.split_offset_from_silence_end_ms = config.split_offset_from_silence_end_ms
         self.split_silence_top_db = config.split_silence_top_db
 
-        self.align_model = None
-        self.align_metadata = None
-
-    def _load_align_model(self):
-        if self.align_model is None:
-            self.logger.info(f"Loading whisperX alignment model for language: {self.lang}...")
-            print(f"[INFO] Loading whisperX alignment model for '{self.lang}' on device '{self.device}'.")
-            try:
-                self.align_model, self.align_metadata = whisperx.load_align_model(language_code=self.lang, device=self.device)
-            except Exception as e:
-                self.logger.error(f"Failed to load whisperX alignment model: {e}", exc_info=True)
-                print(f"[ERROR] Failed to load whisperX alignment model: {e}", file=sys.stderr)
-                raise
-
     def _align(self, audio_path, transcript):
         self.logger.info(f"Running whisperX alignment for {os.path.basename(audio_path)}")
         try:
+            from asr import get_whisperx_align_model
+            align_model, align_metadata = get_whisperx_align_model(self.lang, self.device)
             audio = whisperx.load_audio(audio_path)
             duration = len(audio) / whisperx.audio.SAMPLE_RATE
 
@@ -188,7 +176,7 @@ class AudioSplitter:
                 "end": duration
             }]
 
-            aligned_result = whisperx.align(segments_to_align, self.align_model, self.align_metadata, audio, self.device, return_char_alignments=True)
+            aligned_result = whisperx.align(segments_to_align, align_model, align_metadata, audio, self.device, return_char_alignments=True)
             return aligned_result
         except Exception as e:
             self.logger.error(f"WhisperX alignment failed for {audio_path}: {e}", exc_info=True)
@@ -393,7 +381,8 @@ class AudioSplitter:
 
 
     def split(self, pairs, outdir):
-        self._load_align_model()
+        # align model 由 _align 从 asr 模块的 lru_cache 懒加载（与 asr force_align 共享）。
+        # 处理完后 processor 通过 asr.unload_align_model() 统一释放。
         results = {}
         for (audio_path, lab_text) in pairs:
             try:

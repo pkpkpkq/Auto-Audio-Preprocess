@@ -12,7 +12,17 @@ from audio_splitter import AudioSplitter
 import audio_utils as au
 import audio_normalizer as norm
 import audio_validator as val
-from config_types import PipelineConfig, NormalizerConfig, SplitConfig, SerConfig, AsrConfig, CheckPipelineConfig, AuditCheckConfig, ClippingCheckConfig, SilenceRatioCheckConfig, SnrCheckConfig, AudioEntry, PIPELINE_STAGES
+from config_types import PipelineConfig, NormalizerConfig, SplitConfig, SerConfig, AsrConfig, CheckPipelineConfig, AuditCheckConfig, ClippingCheckConfig, SilenceRatioCheckConfig, SnrCheckConfig, AudioEntry
+
+
+def _safe_unload(module_name: str, fn_name: str):
+    """安全调用模块的卸载函数；模块未加载或 stub 模块无此 API 时静默跳过。"""
+    mod = sys.modules.get(module_name)
+    if mod is None:
+        return
+    fn = getattr(mod, fn_name, None)
+    if callable(fn):
+        fn()
 
 class DatasetProcessor:
     """封装整个数据集处理流程的类"""
@@ -71,12 +81,27 @@ class DatasetProcessor:
         if not self.ser_enabled or not entries:
             return
         self._ensure_ser_model()
-        self.ser_recognizer.predict_emotion_batch(entries)
+        if self._ser_config.on_failure == "isolate":
+            valid = []
+            failed = []
+            for entry in entries:
+                try:
+                    entry.emotion = self.ser_recognizer.predict_emotion(entry.absolute_path)
+                    valid.append(entry)
+                except Exception as e:
+                    self.logger.error(f"情感预测失败，隔离文件 {entry.path}: {e}")
+                    failed.append(entry)
+            if failed:
+                self._isolate_entries(failed, "SER失败")
+            entries.clear()
+            entries.extend(valid)
+        else:
+            self.ser_recognizer.predict_emotion_batch(entries)
 
     def _isolate_entries(self, entries, subfolder_name):
         if not entries:
             return
-        isolate_dir = os.path.join(self.output_dir, subfolder_name)
+        isolate_dir = os.path.join(self.output_dir, "隔离", subfolder_name)
         os.makedirs(isolate_dir, exist_ok=True)
         for entry in entries:
             try:
@@ -893,6 +918,8 @@ class DatasetProcessor:
         """执行完整的数据集处理流程。"""
         self._setup_paths_and_logging()
         all_entries = self._find_audio_entries()
+        # ASR 主体模型 (funasr/punc/whisperx_model) 用完；align 留给 split 复用
+        _safe_unload("asr", "unload_asr_models")
 
         # Stage: after_scan
         all_entries = self._run_checks_at_stage(all_entries, "after_scan")
@@ -918,6 +945,8 @@ class DatasetProcessor:
         if self.ser_enabled:
             self._run_ser_on_entries(short_list)
             self._run_ser_on_entries(normal_list)
+            # 让 SER 在 split 期不再常驻 — split 期显存峰值只含 align 模型
+            _safe_unload("ser", "unload_models")
 
         # Merge short
         processed_short_entries, merge_map_lines = self._process_short_files(short_list)
@@ -928,12 +957,15 @@ class DatasetProcessor:
         # Stage: after_merge
         all_entries = self._run_checks_at_stage(all_entries, "after_merge")
 
-        # Split long
+        # Split long — align model 在此阶段被 lazy 加载并使用
         unsplit_long_entries, split_entries = self._process_long_files(long_list)
+        # align 用完了；下一阶段 SER(2) 重新 lazy 加载 SER backend
+        _safe_unload("asr", "unload_align_model")
 
         # SER(2): on split segments
         if self.ser_enabled:
             self._run_ser_on_entries(split_entries)
+            _safe_unload("ser", "unload_models")
 
         # Handle split failures
         if unsplit_long_entries:
@@ -944,6 +976,7 @@ class DatasetProcessor:
             else:  # "ignore"
                 if self.ser_enabled:
                     self._run_ser_on_entries(unsplit_long_entries)
+                    _safe_unload("ser", "unload_models")
 
         # Combine all entries (no after_split stage — merged into final)
         all_entries = all_entries + unsplit_long_entries + split_entries

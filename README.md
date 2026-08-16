@@ -107,7 +107,7 @@ checks:
     enable: true
     run_at: ["after_normalize", "final"]
     reject_action: "isolate"           # 超标处理方式: warn_only (仅警告) | isolate (隔离) | remove (移除)
-    clip_threshold: 0.99               # 振幅门限 (0.99 即 -0.08 dBFS 判定为削波)
+    clip_threshold: 0.99               # 振幅门限 (0.99 即 ≈ -0.09 dBFS 判定为削波)
     warn_threshold: 0.01               # 削波样本比例 > 1% 警告
     reject_threshold: 0.05             # 削波样本比例 > 5% 拒绝 (仅在 run_at 的最后一个阶段生效)
   silence_ratio:
@@ -139,12 +139,12 @@ audio:
 
   # 直流偏移消除
   dc_offset_removal:
-    enable: true
+    enabled: true             # 注意为 enabled
     threshold: 0.001          # 直流分量均值大于此值才消除，使用 ffmpeg highpass=f=5
 
   # 首尾静音修剪
   trim_silence:
-    enable: true
+    enabled: true             # 注意为 enabled
     top_db: 30                # 相对峰值的静音门限 (dB)
     frame_length: 2048
     hop_length: 512
@@ -153,7 +153,7 @@ audio:
 
   # LUFS 响度归一化
   loudness:
-    enable: true
+    enabled: true             # 注意为 enabled
     target_lufs: -16          # 目标感知响度 (TTS 建议 -16 到 -19; SVC 建议 -18 以保留动态)
     true_peak: -1.5           # 真实峰值限制 (dBTP)
     lra: 7                    # 响度范围 (LU)
@@ -161,10 +161,10 @@ audio:
 ```
 
 ### 4.3 文本清洗与 ASR (`text:` 和 `asr:`)
-* **文本繁简转换与正则替换**：在扫描阶段，将繁体字统一转换为简体字，并执行 `replace_map` 中配置的文本清理。
+* **文本繁简转换与正则替换**：在扫描阶段处理 `{ASR}` 占位符时，将 ASR 识别出的语音文本转换为简体字；并执行 `replace_map` 中配置的字符规则清理。
 * **特殊占位符支持**：
   * `{SKIP}`: 包含此占位符的条目（如 lab 中包含该标记）将被完全跳过，不录入流水线。
-  * `{ASR}`: 将使用 FunASR 识别结果自动填充该占位符。
+  * `{ASR}`: 将使用 ASR 模型识别结果自动填充该占位符。
 ```yaml
 text:
   t2s: true
@@ -177,22 +177,22 @@ text:
 asr:
   language: "zh"
   funasr:
-    model: "paraformer-zh"     # 中文 ASR 推荐
-    use_vad: false
+    model: "FunAudioLLM/SenseVoiceSmall"
+    use_vad: true
   whisperx:
-    model: "large-v2"          # WhisperX 强制对齐用模型
+    model: "large-v2"          # WhisperX 模型
     batch_size: 16
 ```
 
 ### 4.4 时长分类与切分合并 (`split_and_merge:` 和 `split:`)
 * **短音频合并**：音频时长 $\le$ `short_threshold` 的条目被判定为短音频，会按情感分组并拼接（片段间填充 `merge_silence_duration` 秒的静音）。
-* **长音频切分**：音频时长 $\ge$ `long_threshold` 的条目被判定为长音频，会利用 `whisperx` 词级对齐、动规寻找最长静音停顿处作为切分点，并自动纠正句首标点符号（将其移至上一句句尾）。
+* **长音频切分**：音频时长 $\ge$ `long_threshold` 的条目被判定为长音频，会利用 `whisperx` 词级对齐、动规寻找最长静音停顿处作为切分点，并自动纠正句首标点符号（将其移至上一句句尾）。切分后单段目标最大时长由 `split.max_duration` 约束。
 * **切分失败策略**：`on_split_failure` 控制无法成功切分的音频是隔离 (`isolate`) 还是忽略并继续 (`ignore`)。
 
 ```yaml
 split_and_merge:
-  short_threshold: 3.0
-  long_threshold: 25.0
+  short_threshold: 3.0          # ≤ 此值为短音频 (会被分组合并)
+  long_threshold: 25.0          # ≥ 此值为长音频 (触发自动切分)
   merge_silence_duration: 0.3
   output_to_split_folder: false # 切分后的音频是否单独放入"切分后/"文件夹
   on_split_failure: "ignore"
@@ -201,7 +201,7 @@ split:
   device: "auto"
   language: "zh"
   min_duration: 3.0             # 切分后片段最小时长
-  max_duration: 25.0            # 切分后片段最大时长
+  max_duration: 25.0            # 切分后片段目标最大时长
   max_segments: 5               # 单个长音频最大切分段数
   split_silence_top_db: 40      # 切分点判定相对门限
   split_min_silence_len_ms: 500 # 判定为切分点的最小静音时长
@@ -213,7 +213,7 @@ split:
 
 ```yaml
 ser:
-  enable: true
+  enabled: true                 # 注意为 enabled
   backend: "hubert"             # 后端切换: hubert | emotion2vec | sensevoice
   device: "auto"
   on_failure: "default"         # 推理失败策略: default (转unknown) | truncate_and_retry (截断重试) | isolate (隔离)
@@ -235,35 +235,36 @@ ser:
 
 ```
 output/
-├───Data.log                  # 本次运行的详细日志
-├───Data.list                  # TTS 训练用格式标注列表 (路径|文本)
-├───Data.jsonl                 # 新增：含丰富元数据 (如时长、情绪标签) 的 JSON 行标注
-└───Data/                      # 音频和审计结果子目录
-    ├───！格式审计.after_scan.txt
-    ├───！静默比例.after_normalize.txt
-    ├───！SNR.after_normalize.txt
-    ├───！削波检测.after_normalize.txt
-    ├───！合并记录.txt          # 短音频拼接合并的追溯记录
-    ├───！切分记录.txt          # 长音频切分的对齐及段落记录
-    ├───！去重记录.txt          # 因 .lab 内容 hash 相同而被去重的记录
-    ├───！00-25-30.txt          # 生成的时长标记空文件 (格式: ！时-分-秒)
-    ├───Data_merged_1.wav      # 合并产生的音频
-    ├───audio1.wav             # 正常流转的归一化音频
-    ├───切分后/                 # (仅当 output_to_split_folder: true 时)
-    │   ├───audio2_part1.wav
-    │   └───audio2_part2.wav
-    ├───隔离/                  # 被检测剔除的不合格音频 (仅 reject_action="isolate" 时)
-    │   ├───clipping_after_normalize/
-    │   └───silence_ratio_after_normalize/
-    ├───切分失败/               # 切分失败的长音频 (仅 on_split_failure="isolate" 时)
-    ├───SER失败/                # SER 报错的音频 (仅 ser.on_failure="isolate" 时)
-    │
-    │   # 情感分类目录 (程序根据情绪类别动态创建)
-    ├───neutral/
-    │   ├───audio1.wav -> 软链接或复制
-    │   └───...
-    ├───angry/
-    └───...
+└───<角色名>/                             # base_output_dir
+    ├───<角色名>.log                     # 本次运行的详细日志
+    ├───<角色名>_<emotion>.list          # 启用 SER 时按情感生成的训练标注列表 (路径|角色名|语言|文本)
+    ├───<角色名>_<emotion>.jsonl         # 启用 SER 时按情感生成的 JSON 行元数据
+    │   (未启用 SER 时为单一 <角色名>.list / <角色名>.jsonl)
+    └───<角色名>/                         # output_dir 主产物目录
+        ├───！格式审计.after_scan.txt
+        ├───！静默比例.after_normalize.txt
+        ├───！SNR.after_normalize.txt
+        ├───！削波检测.after_normalize.txt
+        ├───！合并记录.txt               # 短音频拼接合并的追溯记录
+        ├───！切分记录.txt               # 长音频切分的对齐及段落记录
+        ├───！去重记录.txt               # 因 .lab 内容 hash 相同而被去重的记录
+        ├───！00-25-30_<emotion>.txt     # 各情感累计时长标记空文件 (格式: ！时-分-秒_<emotion>.txt)
+        │
+        ├───<emotion_1>/                 # 启用 SER 时，音频文件直接按预测情感归类存放
+        │   ├───audio1.wav
+        │   ├───<角色名>_merge_1.wav      # 合并产生的音频
+        │   └───切分后/                  # (仅当 output_to_split_folder: true 时)
+        │       ├───audio2_part1.wav
+        │       └───audio2_part2.wav
+        ├───<emotion_2>/
+        │   └───...
+        │
+        ├───隔离/                        # 质检阶段剔除的不合格音频 (仅 reject_action="isolate" 时)
+        │   ├───clipping_after_normalize/
+        │   ├───silence_ratio_after_normalize/
+        │   └───snr_after_normalize/
+        ├───切分失败/                    # 切分失败的长音频 (仅 on_split_failure="isolate" 时)
+        └───SER失败/                     # 情感分类失败的音频 (仅 ser.on_failure="isolate" 时)
 ```
 
 ---

@@ -28,7 +28,7 @@ def _detect_funasr_model_type(model_name: str) -> str:
 
 # ── FunASR model loading ───────────────────────────────────────────
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=1)
 def _get_funasr_model(device, model_name="paraformer-zh", use_vad=False, vad_max_single_segment_time=30000,
                       trust_remote_code=False):
     model_kwargs = {"model": model_name, "device": device, "hub": "hf"}
@@ -151,7 +151,7 @@ def _get_whisperx_model(model_name: str, device: str, language: str):
 
 
 @lru_cache(maxsize=1)
-def _get_whisperx_align_model(language: str, device: str):
+def get_whisperx_align_model(language: str, device: str):
     import whisperx
     return whisperx.load_align_model(language_code=language, device=device)
 
@@ -179,7 +179,7 @@ def _force_align_with_whisperx(wav_path: str, text: str, asr_config: AsrConfig) 
     align_lang = asr_config.whisperx_align.language
 
     try:
-        align_model, align_metadata = _get_whisperx_align_model(align_lang, align_device)
+        align_model, align_metadata = get_whisperx_align_model(align_lang, align_device)
     except Exception as e:
         print(f"[ERROR] 加载 WhisperX 对齐模型失败: {e}", file=sys.stderr)
         return None
@@ -249,9 +249,41 @@ def transcribe_audio(wav_path: str, asr_config: AsrConfig) -> list[dict]:
             raise ValueError(f"未知的 ASR 后端: {asr_config.backend}")
 
 
+# ── Model lifecycle (unload) ──────────────────────────────────────
+# ponytail: lru_cache cache_clear 一刀全清；本项目单进程串行 + 单 backend active 时无副作用。
+# 切多 backend 并发 / hot-reload 时升级到 refcount registry。
+
+def unload_asr_models():
+    """释放 ASR 主体模型 (funasr/punc/whisperx_model)。
+    保留 align 模型 — split 阶段 (audio_splitter) 会复用。
+    """
+    _get_funasr_model.cache_clear()
+    _get_punc_model.cache_clear()
+    _get_whisperx_model.cache_clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def unload_align_model():
+    """释放 WhisperX 对齐模型 — asr force_align 与 audio_splitter 共享。"""
+    get_whisperx_align_model.cache_clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def unload_models():
+    """释放 ASR 全部模型 (含 align)。"""
+    unload_asr_models()
+    unload_align_model()
+
+
 # ── Standalone test ───────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Ponytail smoke check: unload API surface must be callable + work on empty caches.
+    assert all(callable(fn) for fn in (unload_models, unload_asr_models, unload_align_model))
+    unload_models()  # no-op on empty caches; fails if any underlying cache_clear breaks
+
     if len(sys.argv) < 3:
         print("Usage: python asr.py <wav_path> <output_json>")
         sys.exit(1)

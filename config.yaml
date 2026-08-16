@@ -1,33 +1,76 @@
-# 数据集处理配置
+# 数据集处理配置 (AudioPreProcess Configuration)
 
 # ============================================================
-# 配置项按管道执行顺序排列:
-#   1.输入扫描/文本处理 → 检查(after_scan) → 2.音频归一化
-#   → 检查(after_normalize) → 3.时长分类 → 检查(after_classify)
-#   → 4.情感分类(SER) → 5.短音频合并 → 检查(after_merge)
-#   → 6.长音频切分+切分段SER → 检查(final)
-#   → 10.输出 → 11.清理缓存
+# 【完整流水线执行时序与配置映射】
+#
+#   1. 输入扫描 & 文本处理 [第 1、2 节: root_dir, text, asr]
+#      - 扫描配对、hash 去重、文本清洗与繁简转换
+#      - 若有 {ASR} 占位符则按需启动 ASR 识别填充，随后立即释放模型
+#      └── 质检插桩阶段: after_scan (执行格式审计 audit)
+#
+#   2. 音频归一化 [第 3 节: audio]
+#      - 逐条处理写入 temp_dir (原文件不动): 格式转换+去直流 → 静音修剪 → LUFS响度
+#      └── 质检插桩阶段: after_normalize (削波 clipping / 静默比例 silence_ratio / 信噪比 snr)
+#
+#   3. 时长分流 [第 5 节: split_and_merge.short/long_threshold]
+#      - 划分为: 短音频 (≤ short) / 常规音频 / 长音频 (≥ long)
+#      └── 质检插桩阶段: after_classify (可选)
+#
+#   4. 首次情感识别 SER(1) [第 4 节: ser]
+#      - 对短音频与常规音频进行批量情感预测，完成后立即释放 SER 模型
+#
+#   5. 短音频合并 [第 5 节: split_and_merge.merge_silence_duration]
+#      - 同情感短音频拼接；跨情感剩余碎片使用多数投票法归类
+#      └── 质检插桩阶段: after_merge (可选)
+#
+#   6. 长音频切分 [第 6 节: split]
+#      - WhisperX 字符级强制对齐 → 动态规划 (DP) 寻找静音切分点 → ffmpeg 无损裁剪与标点回移
+#
+#   7. 二次情感识别 SER(2) [第 4 节: ser]
+#      - 对切分后的子片段独立进行情感预测；处理切分失败音频 (on_split_failure)
+#      └── 质检插桩阶段: final (全量条目终审质检)
+#
+#   8. 输出整理与标注生成 [第 7 节: use_lab_text_as_filename, output]
+#      - 按情感分目录归档音频，生成对应 .list 与 .jsonl 标注文件及汇总报告
+#
+#   9. 临时缓存清理 (自动执行)
+#      - 自动移除 temp_dir 临时目录
 # ============================================================
 
+
 # ============================================================
-# 检查流水线
-# run_at 可选阶段: after_scan, after_normalize, after_classify, after_merge, final
-# reject_action: warn_only=仅报告, isolate=复制到 隔离/<检查名>_<阶段>/ 并移出流程, remove=直接移出流程
-# 注意: 同一检查配置多个 run_at 时, 仅最后一次执行会真正应用拒绝动作
+# 0. 质检流水线 (Quality Checks Pipeline)
+# 全局质检插桩系统，支持在流水线的各个关键节点进行音频质量审查与拦截。
+#
+# run_at 可选阶段:
+#   - after_scan:       输入扫描与文本处理后 (首选: 格式审计 audit)
+#   - after_normalize:  音频三步归一化后 (首选: 削波检测 clipping, 静默比例 silence_ratio, SNR)
+#   - after_classify:   时长分类后 (可选)
+#   - after_merge:      短音频合并后 (可选)
+#   - final:            全流程结束、输出整理前 (首选: 全量指标终审)
+#
+# reject_action (违规样本处理策略):
+#   - warn_only: 仅在报告中记录，音频继续保留在流水线中
+#   - isolate:   将不合格音频复制到 隔离/<检查名>_<阶段>/ 目录，并从流水线中剔除
+#   - remove:    直接从流水线中剔除 (不保留隔离文件)
+#
+# ⚠️ 注意:
+#   1. 同一检查配置多个 run_at 时 (如 ["after_normalize", "final"])，仅最后一次执行会真正应用拒绝动作
+#   2. audit (格式审计) 仅输出元数据报告，不支持 reject_action (不隔离/剔除文件)
 # ============================================================
 checks:
   audit:
     enable: true
     run_at: ["after_scan", "final"] 
-    target_sample_rate: 44100
-    target_channels: 1
-    target_bit_depth: 16
+    target_sample_rate: 44100   # 审计目标采样率 (建议与第 3 节 audio.target_sample_rate 保持一致)
+    target_channels: 1          # 审计目标声道数
+    target_bit_depth: 16        # 审计目标位深
 
   clipping:
     enable: true
     run_at: ["after_normalize", "final"]  
-    reject_action: "isolate"   # 默认仅报告；如需剔除可改为 isolate/remove
-    clip_threshold: 0.99          # 振幅 ≥ 0.99 (即 -0.04 dBFS) 视为削波
+    reject_action: "isolate"
+    clip_threshold: 0.99          # 振幅 ≥ 0.99 (即 ≈ -0.09 dBFS) 视为削波
     warn_threshold: 0.01          # 削波样本比例 > 1% 警告
     reject_threshold: 0.05       # 削波样本比例 > 5% 拒绝
 
@@ -48,10 +91,10 @@ checks:
     reject_db: 15                 # SNR < 15dB 拒绝
 
 
-
 # ============================================================
-# 1.输入扫描
-# 扫描目录中音频 + .lab 配对文件, 同内容 hash 去重, 多格式优先选 .wav
+# 1. 输入扫描 (Input Scan)
+# 扫描输入目录中的音频与 .lab 配对文件，按 .lab 内容 hash 自动去重。
+# 当存在同名不同格式的音频时，按 audio.input_formats 优先级选择 (.wav 优先)。
 # ============================================================
 # 输入目录：包含音频和 .lab 文件的原始数据集文件夹
 root_dir: './input/芙宁娜-emo'
@@ -60,17 +103,19 @@ root_dir: './input/芙宁娜-emo'
 # false: 仅处理根目录下的文件
 recursive: true
 
+
 # ============================================================
-# 2.文本处理 (扫描阶段)
-# 扫描 .lab 文件时执行: 繁→简, 替换规则, {SKIP}/{ASR} 占位符
+# 2. 文本处理与 ASR (Text Processing & ASR)
+# 在输入扫描阶段对 .lab 标注文本执行清洗：繁简转换、字符替换、占位符处理。
+# 若规则替换后文本中存在 {ASR} 占位符，将按需触发 ASR 模型识别并自动填充。
 # ============================================================
 text:
   # 繁体转简体 (使用 OpenCC)
   t2s: true
   # 文本替换规则: 键=要替换的文本, 值=替换后的文本
   # 支持特殊占位符:
-  #   {SKIP}  — 跳过包含此占位符的音频
-  #   {ASR}   — 用语音识别结果替换占位符 (需 asr 配合)
+  #   {SKIP}  — 跳过包含此占位符的音频 (整条丢弃)
+  #   {ASR}   — 用语音识别结果替换占位符 (按需调用下方 asr 配置)
   replace_map:
     "|": ""
     "\n": " "
@@ -89,34 +134,30 @@ text:
     "{M他们}{F她们}": "他们"
     "{PLAYERAVATARSEXPRO[INFO_MALE_PRONOUN_HEINFO_FEMALE_PRONOUN_SHE]}": "他"
     
-    # --- 特殊规则 ---
+    # --- 特殊规则示例 ---
     # {ASR}: 将占位符替换为语音识别结果
-    # 例如，如果 lab 包含 "你好，{PLAYER_NAME}"，并且此规则存在，
-    # 程序会识别整个音频，并尝试用识别出的内容替换 {PLAYER_NAME}。
+    # 例如: lab 包含 "你好，{PLAYER_NAME}"，程序会识别该音频并用识别文本替换 {PLAYER_NAME}
     
     # {SKIP}: 跳过包含此占位符的音频
-    # 例如，如果 lab 包含 "BGM-{NICKNAME}"，此音频文件将被完全跳过。
+    # 例如: lab 包含 "BGM-{NICKNAME}"，该音频文件将被完全跳过
     "{NICKNAME}": "{SKIP}"
 
-# --- ASR (自动语音识别) ---
-# 在扫描阶段为 {ASR} 占位符提供语音识别
+# ── 2a. ASR 自动语音识别配置 ──
+# 仅在扫描阶段遇到 {ASR} 占位符时按需加载，识别完毕后立即释放显存。
 # FunASR 后端支持三种模型 (根据 model 名自动检测):
-#   paraformer-zh:     纯 ASR, 需 punc_model 加标点, 不返回 timestamp (force_align 降级为 WhisperX 补全)
-#   SenseVoiceSmall:   ASR+情感+事件, 自带标点, text 含 <|NEUTRAL|> 等富标记需后处理,
-#                      force_align=true 时需额外传 output_timestamp=True 才返回 timestamp
-#   Fun-ASR-Nano-2512: LLM 架构, 自带标点, 不生成 timestamp (force_align 降级为 WhisperX 补全),
-#                      不支持 batch decoding (内部自动用 batch_size=1 代替 batch_size_s)
+#   paraformer-zh:     纯中文 ASR, 需 punc_model (ct-punc) 加标点, force_align 时调用 WhisperX 补全时间戳
+#   SenseVoiceSmall:   多语言 ASR+情感+事件, 自带标点, 支持原生字符级 force_align 时间戳
+#   Fun-ASR-Nano-2512: LLM 架构, 自带标点, force_align 时调用 WhisperX 补全时间戳, 内部自动使用 batch_size=1
 asr:
-  language: "zh"  # ASR 语言 (通用 ISO 代码, 内部自动映射为各模型格式):
+  language: "zh"  # ASR 语言代码 (通用 ISO 代码, 内部自动映射为各模型格式):
                    #   "zh"|"en"|"ja"|"yue"|"ko"|"auto"|"nospeech"
-                   #   paraformer-zh:  忽略此字段 (仅支持中文)
-                   #   SenseVoiceSmall: 直接使用上述代码 ("auto"=自动检测, "nospeech"=静音检测)
+                   #   paraformer-zh:     忽略此字段 (仅支持中文)
+                   #   SenseVoiceSmall:   直接使用上述代码 ("auto"=自动检测, "nospeech"=静音检测)
                    #   Fun-ASR-Nano-2512: 自动映射为中文全称 ("zh"→"中文", "en"→"英文", "ja"→"日文",
-                   #                     "yue"→"粤语", "ko"→"韩文", "auto"/"nospeech"=不传)
+                   #                       "yue"→"粤语", "ko"→"韩文", "auto"/"nospeech"=不传)
   backend: "funasr"  # ASR 后端: "funasr" (FunASR) | "whisperx" (WhisperX Whisper)
   # 强制对齐开关: true=返回字符级时间戳 segment; false=返回纯文本单个 segment
-  # 为后续 ASR 逻辑 (如精确的占位符文本定位) 准备的时间戳数据
-  # 注意: Fun-ASR-Nano-2512 和Whisper模型不自带 timestamp, force_align=true 时自动调用 WhisperX 强制对齐补全
+  # 为精确的占位符上下文匹配与定位准备时间戳数据
   force_align: True
   # FunASR 参数 (backend="funasr" 时生效)
   funasr:
@@ -136,21 +177,22 @@ asr:
     model: "large-v2"  # Whisper 模型: tiny/base/small/medium/large-v2/large-v3
                         # large-v2 中文效果最佳; medium 为速度/精度折衷
     batch_size: 16     # 推理批大小, GPU 显存不足时减小 (8/4)
-  # WhisperX 强制对齐参数 (force_align=true 且 backend="whisperx" 时生效)
-  # 注意: 此配置独立于 split 段的对齐配置, 不复用切分长音频时的模型/设备
+  # WhisperX 强制对齐参数 (force_align=true 且 backend="whisperx" 或 FunASR 非原生对齐模型时生效)
   whisperx_align:
     device: "auto"     # 对齐模型设备: "cuda", "cpu", "auto" (自动检测)
     language: "zh"     # 对齐模型语言代码 (默认继承 asr.language)
 
+
 # ============================================================
-# 3.音频归一化 (逐条处理, 写入 temp_dir, 原文件不动)
-#   3a. 格式归一化 + DC偏移消除
-#   3b. 首尾静音修剪
-#   3c. LUFS 响度归一化
+# 3. 音频归一化 (Audio Normalization)
+# 对扫描后的所有音频执行标准化处理 (逐条处理写入 temp_dir，原文件不动):
+#   3a. 格式转换与采样率统一 + 直流偏移消除 (DC Offset Removal)
+#   3b. 首尾静音修剪 (Silence Trimming)
+#   3c. LUFS 响度归一化 (Loudness Normalization)
 # 缺少 audio: 段时，管道行为与旧版一致 (不执行预处理)
 # ============================================================
 audio:
-  # ── 3a.格式归一化 ──
+  # ── 3a. 格式归一化 ──
   # 将任意输入格式统一转为 WAV 16-bit PCM，重采样到目标采样率
   # 通过 ffmpeg 实现: -ar <采样率> -ac <声道> -sample_fmt s16
   target_sample_rate: 44100    # 目标采样率 (Hz)
@@ -179,7 +221,7 @@ audio:
   input_formats: ["wav", "flac", "mp3", "ogg", "aac", "m4a"]  # 支持的输入格式
                                                                # 同一 .lab 对应多种格式时，按列表顺序优先选择 (.wav 优先)
 
-  # ── DC 偏移消除 ──
+  # ── 3a 附带: 直流偏移消除 (DC Offset Removal) ──
   # 在格式归一化步骤中附带执行，使用 ffmpeg highpass=f=5 滤波器
   # 去除 5Hz 以下的直流分量 (人声不可闻但对浮点计算有害)
   dc_offset_removal:
@@ -190,7 +232,7 @@ audio:
                                # 0.001 = 0.1% 全量程; 几乎所有录音都有微量 DC 偏移
                                # 低于此值表示无显著 DC 偏移，跳过以节省处理时间
 
-  # ── 4b.首尾静音修剪 ──
+  # ── 3b. 首尾静音修剪 ──
   # 使用 librosa.effects.trim 检测首尾静音段并裁剪
   # 修剪后通过 soundfile 写出 (保证采样率无损)
   trim_silence:
@@ -232,7 +274,7 @@ audio:
                                # openvpi/audio-slicer 默认 max_sil_kept=500ms
                                # RVC 默认 max_sil_kept=5000ms (5s，较宽裕)
 
-  # ── 4c.LUFS 响度归一化 ──
+  # ── 3c. LUFS 响度归一化 ──
   # 基于 EBU R128 标准 (ITU-R BS.1770)，使用 ffmpeg loudnorm 滤波器
   # 确保数据集内所有音频的感知响度一致
   loudness:
@@ -301,16 +343,17 @@ audio:
 
 
 # ============================================================
-# 7.情感分类
-# 将音频按情感分类, 用于训练多情感 TTS/SVC 模型
-# 分类结果影响: 短音频按情感分组合并, 输出按情感分目录
+# 4. 情感分类 (Speech Emotion Recognition, SER)
+# 识别音频的情感标签，用于多情感 TTS/SVC 模型训练与数据集分流。
+#
+# 在流水线中执行两次:
+#   - SER(1): 在归一化与时长分类后，对短音频和常规音频进行情感预测 (为同情感合并提供标签)
+#   - SER(2): 在长音频切分后，对切分产生的每个子片段独立进行情感预测
 #
 # 支持三种后端 (backend):
-#   hubert:       原有 HuBERT 模型, 6s 截断, 6类情感
-#   emotion2vec:  emotion2vec+ large, 无硬截断(推荐≤30s), 9类情感
-#   sensevoice:   SenseVoiceSmall, VAD分块处理>30s, 7类情感
-#
-# SER 在归一化后执行, 长音频切分后每个片段独立推断
+#   hubert:       HuBERT 模型, 6s 硬截断, 输出 6 类情感
+#   emotion2vec:  emotion2vec+ large, 推荐 ≤30s, 输出 9 类情感
+#   sensevoice:   SenseVoiceSmall, 内置 VAD 分块, 输出 7 类情感
 # ============================================================
 ser:
   enabled: true
@@ -318,9 +361,9 @@ ser:
   device: "auto"       # "cuda", "cpu", "auto"
 
   # SER 失败处理策略
-  # "default":             返回 "unknown" 标签, 音频继续流程
-  # "truncate_and_retry":  截断音频到安全时长后重试 (防OOM), 仅对 emotion2vec 有效
-  # "isolate":             将音频移入 "SER失败/" 子目录, 不参与后续流程
+  # "default":             返回 "unknown" 标签, 音频继续后续流程
+  # "truncate_and_retry":  截断音频到 safe_max_duration 后重试 (防 OOM), 仅对 emotion2vec 有效
+  # "isolate":             将音频移入 隔离/SER失败/ 目录, 移出流水线
   on_failure: "default"
 
   # --- HuBERT 后端 ---
@@ -341,17 +384,19 @@ ser:
     ban_emo_unk: false
     vad_max_single_segment_time: 30000  # ms
 
+
 # ============================================================
-# 8.时长分类与处理
-#   8a. 按时长分为 短/正常/长 三类
-#   8b. 长音频 → 自动切分 (whisperX 对齐 → 静音检测 → ffmpeg 裁剪)
-#   8c. 短音频 → 按情感分组 → 2-3 个一组合并 (ffmpeg concat + 静音间隔)
+# 5. 时长分流与短音频合并 (Duration Split & Merge)
+#   5a. 时长分流: 将归一化后的音频划分为 短音频 (≤ short)、常规音频、长音频 (≥ long)
+#   5b. 短音频合并: 在 SER(1) 识别情感后，按同情感分组进行 2-3 个一组合并 (ffmpeg concat + 静音间隔)
+#                   跨情感剩余碎片使用多数投票法 (Majority Vote) 归类
 # ============================================================
 split_and_merge:
-  short_threshold: 3.0  # 小于等于此值为短音频 (会被合并)
+  short_threshold: 3.0  # 小于等于此值为短音频 (会被分组合并)
                          # TTS=3.0 / SVC=3.0-5.0
                          # 短于 3s 的片段缺少足够的音素多样性，模型难以学习韵律
-  long_threshold: 25.0  # 大于等于此值为长音频 (会被切分)
+  long_threshold: 25.0  # 大于等于此值为长音频 (触发自动切分门限)
+                         # 区分说明: 此项控制“哪些音频需要切分”，而第 6 节 split.max_duration 控制“切分出的片段最大时长”
                          # TTS=25.0 / SVC=15.0-20.0
                          # GPT-SoVITS: 25s 上限; So-VITS-SVC: 15s 更安全 (避免 GPU OOM)
                          # 注意: Whisper/WhisperX 对齐上限 30s
@@ -360,26 +405,31 @@ split_and_merge:
                                 # GPT-SoVITS 默认片段间隔 0.3s
                                 # SVC 歌唱需要稍多间隔以保留乐句节奏感
   output_to_split_folder: false # true: 切分文件输出到 "切分后" 子文件夹; false: 和其他文件一起输出
-  # 切分失败处理策略
-  # "ignore":  保留在流程中, 继续对其跑 SER
-  # "isolate": 将切分失败的长音频移入 "切分失败/" 子目录, 不参与后续流程
+  # 切分失败处理策略 (长音频切分失败时的回退机制)
+  # "ignore":  保留在流程中, 继续对其跑 SER 情感识别并输出
+  # "isolate": 将切分失败的长音频移入 隔离/切分失败/ 目录, 移出流水线
   on_split_failure: "ignore"
 
-# --- 长音频切分配置 ---
-# 推荐时长范围 (秒):
-#   TTS: GPT-SoVITS 推荐 3-25s
-#        VITS/LJSpeech 数据集 1-10s
-#        F5-TTS 上限 15s
-#   SVC: So-VITS-SVC 推荐 5-15s (官方 README)
-#        RVC 按固定 3.7s 切分 (代码强制4秒一切)
-#        Diff-SVC 24kHz 训练，切片 ~5-10s
+
+# ============================================================
+# 6. 长音频切分 (Long Audio Split)
+# 长音频处理流程:
+#   1. WhisperX 强制对齐生成字符级时间戳
+#   2. 动态规划 (DP) 寻找最优静音切分点
+#   3. ffmpeg 精确裁剪音频并同步切分 .lab 文本
+#   4. 标点符号回移校正 (adjust_punctuation)
+#   5. 对每个切分出的子片段独立执行 SER(2) 情感分类
+# ============================================================
 split:
-  # --- whisperx对齐模型与设备 ---
+  # --- whisperx 对齐模型与设备 ---
   device: "auto"              # "cuda", "cpu", "auto" (自动检测 GPU)
   language: "zh"              # whisperx 使用的语言代码
                                # "zh" 中文, "en" 英文, "ja" 日文 等
 
   # --- 切分策略 ---
+  # 推荐时长范围 (秒):
+  #   TTS: GPT-SoVITS 推荐 3-25s; VITS/LJSpeech 数据集 1-10s; F5-TTS 上限 15s
+  #   SVC: So-VITS-SVC 推荐 5-15s; RVC 按 3.7s 切分; Diff-SVC 切片 ~5-10s
   min_duration: 3.0             # 切分后单段最小时长 (秒)
                                   # TTS=3.0 / SVC=5.0
                                   # So-VITS-SVC 推荐 5s 起; GPT-SoVITS (openvpi/audio-slicer) 默认 min_length=5s
@@ -388,27 +438,31 @@ split:
                                   # TTS=25.0 / SVC=15.0
                                   # GPT-SoVITS: 25s 可用; So-VITS-SVC 官方建议 <15s
                                   # 超过 15s 在 SVC 训练中可能导致 GPU 显存溢出
-  max_segments: 5               # 单个长音频最多切成几段
-                                  # 限制切分段数避免产生过多碎片
+  max_segments: 5               # 单个长音频最多切成几段 (限制切分段数避免碎片化)
 
   # --- 静音检测与切分点 ---
-  split_silence_top_db: 40      # 静音判定门限 (同 trim_silence.top_db, 参阅该方法说明)
+  split_silence_top_db: 40      # 静音判定门限 (同 trim_silence.top_db)
                                    # 值越大 → 越难判定为静音 → 切分更保守 (更少切分点)
                                    # 值越小 → 越易判定为静音 → 切分更积极 (更多切分点)
-                                  # 此参数用于 whisperX 对齐后检测静音区间以确定切分点
-                                  # TTS=35-40 / SVC=30-35
-                                  # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB RMS, 约等效 top_db=40
-                                  # RVC: threshold=-42dB RMS
-                                  # SVC 歌唱需较大值以保留弱音/气声
+                                   # 此参数用于 whisperX 对齐后检测静音区间以确定切分点
+                                   # TTS=35-40 / SVC=30-35
+                                   # GPT-SoVITS (openvpi/audio-slicer): threshold=-40dB RMS, 约等效 top_db=40
+                                   # RVC: threshold=-42dB RMS
+                                   # SVC 歌唱需较大值以保留弱音/气声
   split_min_silence_len_ms: 500 # 最小静音时长 (毫秒), 用于过滤字间/词间短停顿
-                                  # TTS=300-500 / SVC=300-500
-                                  # 低于此值的静音不作为切分点，避免在词间停顿处误切
+                                   # TTS=300-500 / SVC=300-500
+                                   # 低于此值的静音不作为切分点，避免在词间停顿处误切
   split_offset_from_silence_end_ms: 0 # 在静音区段末尾的偏移量 (毫秒), 负数表示提前切
                                         # 0: 在静音结束时切分; -100: 提前 100ms 切入语音起始
                                         # 微调切分点位置以避免切掉后一句的开头
 
+
 # ============================================================
-# 9.输出
+# 7. 输出整理与标注生成 (Output Finalization)
+# 全流程完成后的文件整理与标注元数据生成:
+#   - 音频文件按情感子目录归类 (启用 SER 时)
+#   - 生成训练列表文件 (.list) 与富元数据文件 (.jsonl)
+#   - 生成时长摘要 (！<时长>_<emotion>.txt) 与合并/切分日志 (！合并记录.txt / ！切分记录.txt)
 # ============================================================
 # 是否使用 .lab 文件的内容作为最终输出的音频文件名
 # true:  使用标注文本命名 (例如 "你好世界.wav")
@@ -417,5 +471,5 @@ use_lab_text_as_filename: false
 
 output:
   jsonl_output: true # true: 为每个 .list 文件生成对应 .jsonl 格式标注文件
-                     # .list: 路径|文本 格式 (GPT-SoVITS)
-                     # .jsonl: JSON 行格式 (含更多元数据，如情感标签)
+                     # .list:  路径|角色名|语言|文本 格式 (GPT-SoVITS 标准格式)
+                     # .jsonl: JSON 行格式 (含 id, audio, text, speaker 等字段)

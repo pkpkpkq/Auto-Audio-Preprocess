@@ -9,13 +9,17 @@
   - 输出控制台报告 + 文本文件 + JSON
 """
 
-import sys, os, json, math, copy
+import sys
+import os
+import json
+import math
+import copy
 from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config_types import load_pipeline_config, AsrConfig
-from asr import transcribe_audio, _force_align_with_whisperx
+from asr import transcribe_audio, _force_align_with_whisperx, unload_models
 
 # ── paths ──────────────────────────────────────────────────────────
 WAV = r"D:\Justin\programs\AudioPreProcess\input\芙宁娜-emo\vo_furina_dialog_pendant_01.wav"
@@ -89,10 +93,11 @@ def main():
     )
     gt_segs = _force_align_with_whisperx(WAV, lab_text, align_cfg)
     if not gt_segs:
-        print("  [FATAL] Ground truth 对齐仍失败，退出。")
+        print("  [FATAL] Ground truth 对齐失败，退出。")
         sys.exit(1)
     gt_text = segs_to_text(gt_segs)
     print(f"  GT 对齐后字符数: {len(gt_text)}  (lab={len(lab_text)})")
+    unload_models()
 
     # ── 5 个模型 ────────────────────────────────────────────────────
     model_defs = [
@@ -141,7 +146,7 @@ def main():
             results.append({"name": name, "error": str(e)})
             emit("")
             continue
-
+        unload_models()
         asr_text = segs_to_text(segs)
         emit(f"  转写结果: {len(segs)} segments, {len(asr_text)} 字符")
         emit(f"  ASR 文本: {asr_text[:200]}...")

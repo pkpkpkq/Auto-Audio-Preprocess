@@ -236,3 +236,43 @@ def test_non_wav_input_converted_and_list_references_wav(tmp_path, monkeypatch):
     assert ".wav|" in list_text
     assert ".flac|" not in list_text
     _write_evidence("task-9-flac-pipeline.txt", f"PASS flac converted: {wavs[0]}\n")
+
+
+def test_ser_on_failure_isolate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ser_isolate_input"
+    input_dir.mkdir()
+    _write_pair(input_dir, "sample_good", sr=44100, text="正常文本")
+    _write_pair(input_dir, "sample_fail", sr=44100, text="失败文本")
+
+    calls = []
+    _patch_fast_enabled_audio(monkeypatch, calls)
+
+    class MockSER:
+        def __init__(self, cfg):
+            self.cfg = cfg
+        def predict_emotion(self, path):
+            if "sample_fail" in path:
+                raise RuntimeError("SER OOM error")
+            return "happy"
+
+    monkeypatch.setattr(sys.modules["ser"], "SpeechEmotionRecognizer", MockSER)
+
+    cfg = _base_config(input_dir, _audio_config(enabled=True), _checks_config(enabled=False))
+    cfg.ser = SerConfig(enabled=True, on_failure="isolate")
+
+    proc = processor.DatasetProcessor(cfg)
+    proc.run()
+
+    out_dir = _output_dir_for(tmp_path, input_dir)
+    isolated_files = list((out_dir / "隔离" / "SER失败").glob("*sample_fail.wav"))
+    assert len(isolated_files) == 1
+
+    happy_dir = out_dir / "happy"
+    happy_files = list(happy_dir.glob("*sample_good.wav"))
+    assert len(happy_files) == 1
+
+
+
+
+
