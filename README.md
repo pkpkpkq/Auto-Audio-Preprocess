@@ -35,18 +35,17 @@ graph TD
 ## 2. 系统准备与安装 (Prerequisites & Installation)
 
 ### 外部依赖
-* **Python**: 推荐 Python 3.8 - 3.12 版本。
+* **Python**: 推荐 Python 3.10 - 3.12 版本。
 * **FFmpeg**: 必须安装 FFmpeg 并确保其可执行文件路径已添加到系统的 `PATH` 环境变量中。程序将调用 `ffmpeg` 和 `ffprobe` 执行音频转换和响度分析。
 
 ### 依赖安装
-推荐使用 `uv` 极速安装，或使用传统 `pip` 方式：
+推荐使用 `uv` 一键同步环境，或使用传统 `pip` 方式：
 
 ```bash
-# 使用 uv 运行（推荐）
-uv venv
-uv pip install -r requirements.txt
+# 使用 uv 一键同步（推荐，自动创建 .venv 并安装锁定依赖）
+uv sync
 
-# 或使用 pip 安装依赖
+# 或使用传统 pip 安装依赖
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -128,7 +127,7 @@ checks:
 
 ### 4.2 音频归一化 (`audio:`)
 控制音频的重采样、声道合并、位深归一化、LUFS 感知响度归一化以及首尾静音切除。
-> **注意**：如果配置文件中缺失整个 `audio:` 配置段，程序将不执行任何音频修改（退化为旧版的只读/纯分析模式）。
+> **注意**：如果配置文件中缺失整个 `audio:` 配置段，程序将不执行这些修改。
 
 ```yaml
 audio:
@@ -285,19 +284,3 @@ python audio_validator.py <待审计的输入目录> [config.yaml路径]
 * `！削波检测.txt` — 标记峰值超标及削波样本率偏高的文件。
 * `！静默比例.txt` — 包含过多静音或整段全静音的音频清单。
 * `！SNR.txt` — 评估信噪比低（含背景噪音、电流声）的音频清单。
-
----
-
-## 7. 开发者与测试指南 (Developer Guide)
-
-本仓库配备了完备的测试套件，用以对格式审计、响度归一化、切分动态规划算法等进行回归验证。
-
-运行所有单元测试：
-```bash
-uv run pytest tests/
-# 或
-pytest tests/
-```
-
-* 纯算法（无 I/O）验证见 `tests/test_split_algorithms.py`。
-* 单元测试配置位于 `pytest.ini`。
