@@ -1,12 +1,15 @@
-import sys
+import json
+import logging
 import os
 import re
-import json
+import sys
 from functools import lru_cache
 import torch
 from funasr import AutoModel
 from audio_utils import setup_model_cache
 from config_types import AsrConfig, load_asr_config
+
+logger = logging.getLogger(__name__)
 
 setup_model_cache()
 
@@ -45,9 +48,6 @@ def _get_funasr_model(device, model_name="paraformer-zh", use_vad=False, vad_max
 @lru_cache(maxsize=1)
 def _get_punc_model():
     return AutoModel(model="ct-punc")
-
-
-
 
 
 # ── FunASR transcription ──────────────────────────────────────────
@@ -181,7 +181,7 @@ def _force_align_with_whisperx(wav_path: str, text: str, asr_config: AsrConfig) 
     try:
         align_model, align_metadata = get_whisperx_align_model(align_lang, align_device)
     except Exception as e:
-        print(f"[ERROR] 加载 WhisperX 对齐模型失败: {e}", file=sys.stderr)
+        logger.error(f"加载 WhisperX 对齐模型失败: {e}", exc_info=True)
         return None
 
     audio = whisperx.load_audio(wav_path)
@@ -194,7 +194,7 @@ def _force_align_with_whisperx(wav_path: str, text: str, asr_config: AsrConfig) 
             return_char_alignments=True,
         )
     except Exception as e:
-        print(f"[WARN] WhisperX 对齐失败: {e}", file=sys.stderr)
+        logger.warning(f"WhisperX 对齐失败: {e}")
         return None
 
     char_segments = []

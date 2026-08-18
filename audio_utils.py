@@ -3,10 +3,21 @@ import re
 import subprocess
 import tempfile
 import wave
-import sys
+import logging
 import os
+import sys
 
 from opencc import OpenCC
+
+logger = logging.getLogger(__name__)
+
+
+def format_progress(label: str, current: int, total: int, width: int = 20) -> str:
+    """格式化单行进度条字符串（供 \\r 覆盖打印）。"""
+    pct = current / total if total > 0 else 0
+    filled = int(pct * width)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"\r[{label}] {current}/{total} ({pct:5.1%}) |{bar}|"
 
 
 def setup_model_cache() -> str:
@@ -30,7 +41,7 @@ def traditional_to_simplified(text, enabled=True):
     try:
         return _t2s_converter.convert(text)
     except Exception as e:
-        print(f"[WARN] 繁简转换失败: {e}", file=sys.stderr)
+        logger.warning(f"繁简转换失败: {e}")
         return text
 
 def sanitize_filename(filename):
@@ -167,8 +178,7 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
             try:
                 subprocess.run(cmd_silence, check=True, timeout=300)
             except subprocess.TimeoutExpired as e:
-                import logging
-                logging.getLogger(__name__).warning(f"生成静音音频超时: {e}")
+                logger.warning(f"生成静音音频超时: {e}")
                 raise RuntimeError("生成静音音频超时") from e
 
         for idx, info in enumerate(wav_infos):
@@ -191,8 +201,7 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
         try:
             subprocess.run(cmd, check=True, timeout=300)
         except subprocess.TimeoutExpired as e:
-            import logging
-            logging.getLogger(__name__).warning(f"ffmpeg 合并超时: {e}")
+            logger.warning(f"ffmpeg 合并超时: {e}")
             raise RuntimeError("ffmpeg 合并超时") from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"ffmpeg 合并失败: {e}")
@@ -201,8 +210,7 @@ def merge_wavs(output_path, wav_infos, silence_duration: float):
             try:
                 os.remove(p)
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"清理临时文件失败: {p}, 错误: {e}")
+                logger.warning(f"清理临时文件失败: {p}, 错误: {e}")
 
 
 def confirm_output_dir(base_output_dir: str) -> bool:

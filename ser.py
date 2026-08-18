@@ -297,6 +297,6 @@ if __name__ == '__main__':
     recognizer = SpeechEmotionRecognizer(test_config)
     if os.path.exists('test.wav'):
         emotion = recognizer.predict_emotion('test.wav')
-        print(f"The predicted emotion is: {emotion}")
+        print(f"预测情感分类结果: {emotion}")
     else:
         print("请放置 test.wav 文件以进行 SER 测试。")

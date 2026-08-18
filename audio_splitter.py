@@ -162,7 +162,7 @@ class AudioSplitter:
         self.split_silence_top_db = config.split_silence_top_db
 
     def _align(self, audio_path, transcript):
-        self.logger.info(f"Running whisperX alignment for {os.path.basename(audio_path)}")
+        self.logger.info(f"正在对 {os.path.basename(audio_path)} 进行 WhisperX 对齐")
         try:
             from asr import get_whisperx_align_model
             align_model, align_metadata = get_whisperx_align_model(self.lang, self.device)
@@ -179,13 +179,12 @@ class AudioSplitter:
             aligned_result = whisperx.align(segments_to_align, align_model, align_metadata, audio, self.device, return_char_alignments=True)
             return aligned_result
         except Exception as e:
-            self.logger.error(f"WhisperX alignment failed for {audio_path}: {e}", exc_info=True)
-            print(f"[ERROR] WhisperX alignment failed for {os.path.basename(audio_path)}: {e}. See log for details.", file=sys.stderr)
+            self.logger.error(f"WhisperX 对齐失败 {audio_path}: {e}", exc_info=True)
             return None
 
 
     def _find_silence_spans(self, audio_path):
-        self.logger.info(f"Finding silence spans in {os.path.basename(audio_path)}")
+        self.logger.info(f"正在检测 {os.path.basename(audio_path)} 中的静音区间")
         try:
             audio, sample_rate = librosa.load(audio_path, sr=None, mono=True)
             
@@ -207,10 +206,10 @@ class AudioSplitter:
             # Filter by min duration
             min_silence_sec = self.split_min_silence_len_ms / 1000.0
             valid_silences = [s for s in silent_spans if (s[1] - s[0]) >= min_silence_sec]
-            self.logger.info(f"Found {len(valid_silences)} valid silence spans.")
+            self.logger.info(f"找到 {len(valid_silences)} 个有效静音区间")
             return valid_silences
         except Exception as e:
-            self.logger.error(f"Failed to find silence spans in {audio_path}: {e}", exc_info=True)
+            self.logger.error(f"检测静音区间失败 {audio_path}: {e}", exc_info=True)
             return []
 
     def _split_single(self, audio_path, transcript, outdir):
@@ -220,8 +219,7 @@ class AudioSplitter:
         total_dur = au.get_wav_duration_seconds(audio_path)
 
         if total_dur <= self.max_duration:
-            self.logger.info(f"Audio is short enough, no split needed for {audio_path}.")
-            print(f"[INFO] Audio is short enough, no split needed for {os.path.basename(audio_path)}.")
+            self.logger.info(f"音频时长符合要求，无需切分: {audio_path}")
             base = os.path.splitext(os.path.basename(audio_path))[0]
             out_wav = os.path.join(outdir, base + ".wav")
             out_lab = os.path.join(outdir, base + ".lab")
@@ -239,37 +237,36 @@ class AudioSplitter:
         aligned_result = self._align(audio_path, transcript)
         align_duration = time.time() - align_start_time
         if aligned_result:
-            self.logger.info(f"WhisperX Alignment for '{os.path.basename(audio_path)}' took {align_duration:.2f} seconds.")
+            self.logger.info(f"'{os.path.basename(audio_path)}' 的 WhisperX 对齐耗时 {align_duration:.2f} 秒")
             silence_spans = self._find_silence_spans(audio_path)
             if silence_spans:
                 planned_splits = plan_splits(total_dur, silence_spans, self.min_duration, self.max_duration)
                 if planned_splits is not None:
-                    self.logger.info(f"Found best plan with {len(planned_splits)} cuts.")
+                    self.logger.info(f"找到最佳切分方案，共 {len(planned_splits)} 处切分点")
                     offset_s = self.split_offset_from_silence_end_ms / 1000.0
                     planned_splits = _enforce_max_segments(planned_splits, total_dur, self.max_segments, self.logger)
                     split_times = [t + offset_s for t in planned_splits]
-                    self.logger.info(f"Final split times: {[round(t, 2) for t in split_times]}")
+                    self.logger.info(f"最终切分时间点: {[round(t, 2) for t in split_times]}")
                 else:
-                    self.logger.warning(f"Could not find an optimal split plan for {audio_path}. Falling back.")
+                    self.logger.warning(f"未能为 {audio_path} 找到最优切分方案，回退到均匀切分")
             else:
-                self.logger.warning(f"No silence spans found in {audio_path}. Falling back.")
+                self.logger.warning(f"{audio_path} 未找到静音区间，回退到均匀切分")
         else:
-            self.logger.error(f"Alignment failed for {audio_path}. Falling back.")
+            self.logger.error(f"对齐失败 {audio_path}，回退到均匀切分")
 
         # 如果智能切分失败，则执行新的后备逻辑
         if split_times is None:
-            self.logger.info(f"Smart splitting failed. Falling back to even splitting, prioritizing max_duration.")
+            self.logger.info("智能切分未成功，回退到基于最大时长的均匀切分")
             
             # 1. 计算满足 max_duration 所需的最小段数
             num_segs = math.ceil(total_dur / self.max_duration)
             
             # 2. 如果需要，警告用户将超出 max_segments
             if num_segs > self.max_segments:
-                self.logger.warning(f"To satisfy max_duration ({self.max_duration}s), audio will be split into {num_segs} segments, exceeding configured max_segments ({self.max_segments}).")
+                self.logger.warning(f"为满足最大时长限制 ({self.max_duration}s)，音频将被切分为 {num_segs} 段，超出设定的最大段数 ({self.max_segments})")
 
             if num_segs <= 1:
-                self.logger.warning(f"Fallback calculation resulted in {num_segs} segments. The audio will not be split.")
-                print(f"[WARN] Cannot find a valid even split for {os.path.basename(audio_path)}. The audio will not be split.")
+                self.logger.warning(f"回退计算得出 {num_segs} 段，该音频将不予切分: {audio_path}")
                 base = os.path.splitext(os.path.basename(audio_path))[0]
                 out_wav = os.path.join(outdir, base + "_part1.wav")
                 out_lab = os.path.join(outdir, base + "_part1.lab")
@@ -280,7 +277,7 @@ class AudioSplitter:
                 return [out_wav]
             
             # 3. 执行均匀切分
-            self.logger.info(f"Fallback: Splitting into {num_segs} equal parts.")
+            self.logger.info(f"回退方案: 均匀切分为 {num_segs} 等份")
             split_times = [(total_dur / num_segs) * (i + 1) for i in range(num_segs - 1)]
             split_times = _enforce_max_segments(split_times, total_dur, self.max_segments, self.logger)
             aligned_result = None # 均匀切分时，无法使用之前的对齐结果
@@ -289,7 +286,7 @@ class AudioSplitter:
         try:
             out_wavs = split_wav_by_times(audio_path, split_times, outdir, base)
         except Exception as e:
-            self.logger.error(f"Failed to split audio {audio_path}: {e}", exc_info=True)
+            self.logger.error(f"切分音频文件失败 {audio_path}: {e}", exc_info=True)
             raise
 
         all_chars = []
@@ -320,7 +317,7 @@ class AudioSplitter:
                     text_part = "".join(part_chars).strip()
 
             if not text_part:
-                self.logger.info("Character-based text split failed. Falling back to sentence-boundary-aware text split.")
+                self.logger.info("基于字符的文本切分未匹配，回退到基于句末标点的文本切分")
                 # Primary: split at sentence-ending punctuation
                 sent_puncs = ['。', '！', '？', '!', '?', '.', '…']
                 # Secondary: split at clause boundaries
@@ -358,7 +355,7 @@ class AudioSplitter:
             text_parts.append(text_part)
 
         # Adjust punctuation between segments
-        self.logger.info("Adjusting punctuation between split segments...")
+        self.logger.info("正在调整切分片段之间的标点符号...")
         adjusted_text_parts = adjust_punctuation(text_parts)
 
         # Write the final lab files
@@ -375,7 +372,6 @@ class AudioSplitter:
                 mf.write(f"{out_basenames} <- {os.path.basename(audio_path)}, splits=[{split_times_str}]\n")
         except Exception as e:
             self.logger.error(f"切分记录写入失败: {e}")
-            print("[ERROR] 切分记录写入失败")
 
         return out_wavs
 
@@ -389,7 +385,6 @@ class AudioSplitter:
                 out_wavs = self._split_single(audio_path, lab_text, outdir)
                 results[audio_path] = out_wavs
             except Exception as e:
-                self.logger.error(f"Split failed for {audio_path}: {e}", exc_info=True)
-                print(f"[WARN] Split failed for {audio_path}: {e}", file=sys.stderr)
+                self.logger.error(f"切分处理失败 {audio_path}: {e}", exc_info=True)
                 results[audio_path] = None
         return results

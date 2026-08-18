@@ -72,8 +72,29 @@ class DatasetProcessor:
         self.log_path = None
         self.logger = None
 
+    @staticmethod
+    def _print_step(step_idx: int, total_steps: int, title: str):
+        print(f"\n{'=' * 60}\n[步骤 {step_idx}/{total_steps}] {title}\n{'=' * 60}")
+
+    @staticmethod
+    def _print_substep(title: str):
+        print(f"\n>>> {title}")
+
+    @staticmethod
+    def _print_info(msg: str):
+        print(f"[INFO] {msg}")
+
+    @staticmethod
+    def _print_warn(msg: str):
+        print(f"[WARN] {msg}", file=sys.stderr)
+
+    @staticmethod
+    def _print_error(msg: str):
+        print(f"[ERROR] {msg}", file=sys.stderr)
+
     def _ensure_ser_model(self):
         if self.ser_enabled and self.ser_recognizer is None:
+            self._print_info(f"正在加载情感识别模型 (后端: {self._ser_config.backend})...")
             from ser import SpeechEmotionRecognizer
             self.ser_recognizer = SpeechEmotionRecognizer(self._ser_config)
 
@@ -81,22 +102,27 @@ class DatasetProcessor:
         if not self.ser_enabled or not entries:
             return
         self._ensure_ser_model()
+        self._print_info(f"正在执行情感识别 (SER, 后端: {self._ser_config.backend})，待处理 {len(entries)} 个文件...")
         if self._ser_config.on_failure == "isolate":
             valid = []
             failed = []
-            for entry in entries:
+            total = len(entries)
+            for i, entry in enumerate(entries, 1):
                 try:
                     entry.emotion = self.ser_recognizer.predict_emotion(entry.absolute_path)
                     valid.append(entry)
                 except Exception as e:
                     self.logger.error(f"情感预测失败，隔离文件 {entry.path}: {e}")
                     failed.append(entry)
+                print(au.format_progress("SER情感识别", i, total), end="", flush=True)
+            print()
             if failed:
                 self._isolate_entries(failed, "SER失败")
             entries.clear()
             entries.extend(valid)
         else:
             self.ser_recognizer.predict_emotion_batch(entries)
+            self._print_info(f"情感识别完成，共分类 {len(entries)} 个文件。")
 
     def _isolate_entries(self, entries, subfolder_name):
         if not entries:
@@ -317,16 +343,16 @@ class DatasetProcessor:
             sys.exit(0)
 
         os.makedirs(self.output_dir, exist_ok=True)
-        print(f"[INFO] 主要音频输出将被保存到: {self.output_dir}")
+        self._print_info(f"主要音频输出将被保存到: {self.output_dir}")
 
         if self.output_to_split_folder:
             self.split_output_dir = os.path.join(self.output_dir, "切分后")
             os.makedirs(self.split_output_dir, exist_ok=True)
-            print(f"[INFO] 切分后的音频将被保存到: {self.split_output_dir}")
+            self._print_info(f"切分后的音频将被保存到: {self.split_output_dir}")
         else:
             self.split_output_dir = self.output_dir # 如果不单独输出，则指向主输出目录
         
-        print(f"[INFO] 日志和列表文件将被保存到: {self.base_output_dir}")
+        self._print_info(f"日志和列表文件将被保存到: {self.base_output_dir}")
 
         self.temp_dir = os.path.join(self.output_dir, "_temp_processing")
         if os.path.exists(self.temp_dir):
@@ -345,9 +371,16 @@ class DatasetProcessor:
         if not self.logger.handlers:
             fh = logging.FileHandler(self.log_path, encoding="utf-8")
             fh.setLevel(logging.INFO)
-            formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
             fh.setFormatter(formatter)
             self.logger.addHandler(fh)
+
+            # 同时为各子模块 logger 附加 FileHandler，确保各模块日志落盘
+            for mod_name in ("audio_normalizer", "audio_validator", "audio_splitter", "ser", "asr", "audio_utils"):
+                mod_logger = logging.getLogger(mod_name)
+                mod_logger.setLevel(logging.INFO)
+                if fh not in mod_logger.handlers:
+                    mod_logger.addHandler(fh)
 
         self.logger.info("="*50)
         self.logger.info("开始新的处理流程")
@@ -476,7 +509,7 @@ class DatasetProcessor:
             ))
 
         if read_failures:
-            print(f"[WARN] 文件读取期间遇到 {len(read_failures)} 个错误。详情请查看日志文件: {self.log_path}", file=sys.stderr)
+            self._print_warn(f"文件读取期间遇到 {len(read_failures)} 个错误。详情请查看日志文件: {self.log_path}")
 
         if duplicate_log_lines:
             try:
@@ -486,10 +519,10 @@ class DatasetProcessor:
                     f.write("以下文件因 .lab 文本内容重复而被跳过处理：\n")
                     f.write("\n".join(duplicate_log_lines))
                     f.write("\n")
-                print(f"[INFO] 发现并跳过了 {len(duplicate_log_lines)} 个重复文件。详情请查看: {self.dedup_log_path}")
+                self._print_info(f"发现并跳过了 {len(duplicate_log_lines)} 个重复文件。详情请查看: {self.dedup_log_path}")
                 self.logger.info(f"追加 {len(duplicate_log_lines)} 条重复记录到 {self.dedup_log_path}")
             except Exception as e:
-                print(f"[WARN] 写入去重日志文件失败: {e}", file=sys.stderr)
+                self._print_warn(f"写入去重日志文件失败: {e}")
                 self.logger.error(f"写入去重日志文件失败: {e}")
 
         total_skipped = skipped_pairing + len(read_failures) + len(duplicate_log_lines) + skipped_rule_count
@@ -500,11 +533,12 @@ class DatasetProcessor:
         return matched
 
     def _normalize_audio(self, all_entries):
-        if not self._cfg.normalizer_enabled:
+        if not self._cfg.normalizer_enabled or not all_entries:
             return all_entries
 
         trim_enabled = self._norm_config.trim_enabled
         loudness_enabled = self._norm_config.loudness_enabled
+        total = len(all_entries)
 
         for index, entry in enumerate(all_entries, start=1):
             current_path = entry.path
@@ -535,6 +569,11 @@ class DatasetProcessor:
                     entry.duration = au.get_audio_duration_seconds(trimmed_path)
                     current_path = trimmed_path
 
+            print(au.format_progress("音频标准化", index, total), end="", flush=True)
+
+        print()
+        self._print_info(f"音频标准化完成，共处理 {total} 个音频文件。")
+        self.logger.info(f"音频标准化完成，共处理 {total} 个音频文件。")
         return all_entries
 
     def _process_short_files(self, short_list):
@@ -548,7 +587,7 @@ class DatasetProcessor:
             emotion_groups[item.emotion].append(item)
         
         self.logger.info(f"短音频按情感分组: { {e: len(v) for e, v in emotion_groups.items()} }")
-        print(f"[INFO] Short audios grouped by emotion: { {e: len(v) for e, v in emotion_groups.items()} }")
+        self._print_info(f"短音频按情感分组: { {e: len(v) for e, v in emotion_groups.items()} }")
 
         processed_entries = []
         merge_map_lines = []
@@ -558,7 +597,7 @@ class DatasetProcessor:
         for emotion, items in emotion_groups.items():
             if len(items) > 1:
                 # 这些组足够大，可以进行标准合并
-                self.logger.info(f"Emotion group '{emotion}' has {len(items)} items and will be merged.")
+                self.logger.info(f"情感类别 '{emotion}' 包含 {len(items)} 条音频，准备合并。")
                 
                 s = items[:]
                 groups = []
@@ -586,7 +625,7 @@ class DatasetProcessor:
                             params, _ = au.read_wav_params_and_frames(item.path)
                             wav_infos.append({"params": params, "path": item.path, "lab_text": item.lab_text, "duration": item.duration, "emotion": item.emotion})
                         except Exception as e:
-                            self.logger.warning(f"Reading wav for merge failed {item.path}: {e}")
+                            self.logger.warning(f"读取待合并音频失败 {item.path}: {e}")
                             processed_entries.append(item)
                     
                     merged_duration = sum(i['duration'] for i in wav_infos)
@@ -601,7 +640,7 @@ class DatasetProcessor:
                         source_files_str = ", ".join([f"{os.path.basename(i['path'])} ({i['emotion']})" for i in wav_infos])
                         merge_map_lines.append(f"{os.path.basename(merge_path)} ({emotion}) <- [{source_files_str}]")
                     except Exception as e:
-                        self.logger.error(f"Merging group {group_idx} for emotion '{emotion}' failed: {e}")
+                        self.logger.error(f"合并情感 '{emotion}' 分组 {group_idx} 失败: {e}")
                         processed_entries.extend(group)
 
             elif len(items) == 1:
@@ -614,7 +653,7 @@ class DatasetProcessor:
         # 3. 合并所有剩余的孤立文件
         if len(leftover_items) > 1:
             self.logger.warning(f"正在合并 {len(leftover_items)} 个来自不同情感类别的孤立音频。")
-            print(f"[WARN] Merging {len(leftover_items)} leftover audios from different emotion groups.")
+            self._print_warn(f"正在合并 {len(leftover_items)} 个来自不同情感类别的孤立音频。")
             
             s = leftover_items[:]
             groups = []
@@ -642,7 +681,7 @@ class DatasetProcessor:
                         params, _ = au.read_wav_params_and_frames(item.path)
                         wav_infos.append({"params": params, "path": item.path, "lab_text": item.lab_text, "duration": item.duration, "emotion": item.emotion})
                     except Exception as e:
-                        self.logger.warning(f"Reading leftover wav for merge failed {item.path}: {e}")
+                        self.logger.warning(f"读取剩余孤立音频失败 {item.path}: {e}")
                         processed_entries.append(item)
 
                 if not wav_infos: continue
@@ -665,7 +704,7 @@ class DatasetProcessor:
                     self.logger.info(log_msg)
 
                 except Exception as e:
-                    self.logger.error(f"Merging leftover group {group_idx} failed: {e}")
+                    self.logger.error(f"合并剩余孤立分组 {group_idx} 失败: {e}")
                     processed_entries.extend(group)
         
         elif len(leftover_items) == 1:
@@ -680,7 +719,7 @@ class DatasetProcessor:
         if not long_list:
             return [], []
 
-        print(f"[INFO] 准备切分 {len(long_list)} 个长音频文件。")
+        self._print_info(f"准备切分 {len(long_list)} 个长音频文件。")
         self.logger.info(f"准备对 {len(long_list)} 个长音频进行批量切分。")
 
         pairs = [(m.path, m.lab_text) for m in long_list]
@@ -727,7 +766,7 @@ class DatasetProcessor:
                 unsplit_entries.append(m)
         
         if split_failures:
-            print(f"[WARN] {len(split_failures)} 个长音频文件自动切分失败。", file=sys.stderr)
+            self._print_warn(f"{len(split_failures)} 个长音频文件自动切分失败。")
 
         return unsplit_entries, split_entries
 
@@ -808,7 +847,7 @@ class DatasetProcessor:
 
         total_duration_seconds = 0
         self.logger.info("--- 最终结果统计 ---")
-        print("\n--- Final Results ---")
+        print("\n=== 处理结果汇总 ===")
 
         # 如果SER禁用，但仍有条目，则它们都将被视为 "neutral"
         if not self.ser_enabled and any(final_output_entries_by_emotion.values()):
@@ -825,7 +864,7 @@ class DatasetProcessor:
             emotion_duration = sum(e.duration for e in entries)
             total_duration_seconds += emotion_duration
             summary_text = f"情感 '{emotion}': {len(entries)} 个文件, 总时长: {au.format_hms(emotion_duration)}"
-            print(summary_text)
+            self._print_info(summary_text)
             self.logger.info(summary_text)
 
             # 为每个情感创建独立的时长文件
@@ -847,7 +886,7 @@ class DatasetProcessor:
                 for ent in entries:
                     ol.write(f"{ent.absolute_path}|{self.folder_name}|ZH|{ent.lab_text}\n")
             self.logger.info(f"已生成列表文件: {list_path}")
-            print(f"Generated list file: {list_path}")
+            self._print_info(f"已生成列表文件: {list_path}")
 
             # 如果启用了 JSONL 输出，则生成对应的 .jsonl 文件
             if self.jsonl_output_enabled:
@@ -863,10 +902,10 @@ class DatasetProcessor:
                         }
                         f_jsonl.write(json.dumps(json_record, ensure_ascii=False) + '\n')
                 self.logger.info(f"已生成 JSONL 文件: {jsonl_path}")
-                print(f"Generated JSONL file: {jsonl_path}")
+                self._print_info(f"已生成 JSONL 文件: {jsonl_path}")
 
         overall_summary = f"最终音频总时长: {au.format_hms(total_duration_seconds)}"
-        print(overall_summary)
+        self._print_info(overall_summary)
         self.logger.info(overall_summary)
 
     def _run_checks_at_stage(self, entries, stage):
@@ -874,8 +913,22 @@ class DatasetProcessor:
         if not entries:
             return entries
 
+        # 检查当前阶段是否有启用的检查项
+        active_checks = []
+        for name, cfg, label in [
+            ("audit", self._check_config.audit, "格式审计"),
+            ("clipping", self._check_config.clipping, "削波检测"),
+            ("silence_ratio", self._check_config.silence_ratio, "静默比例"),
+            ("snr", self._check_config.snr, "SNR"),
+        ]:
+            if cfg.enable and stage in cfg.run_at:
+                active_checks.append(label)
+
+        if active_checks:
+            self._print_substep(f"执行质检审计 [阶段: {stage}] (检查项: {', '.join(active_checks)})")
+
         reject_records = val.run_check_pipeline(
-            entries, self._check_config, stage, self.output_dir
+            entries, self._check_config, stage, self.output_dir, show_progress=bool(active_checks)
         )
 
         if not reject_records:
@@ -905,8 +958,10 @@ class DatasetProcessor:
         remove_count = sum(1 for v in path_to_isolate_info.values() if v[1] == "remove")
         if isolate_count:
             self.logger.info(f"共隔离 {isolate_count} 个文件")
+            self._print_warn(f"质检阶段 [{stage}] 隔离 {isolate_count} 个不合格文件")
         if remove_count:
             self.logger.info(f"共移除 {remove_count} 个不合格文件")
+            self._print_warn(f"质检阶段 [{stage}] 移除 {remove_count} 个不合格文件")
 
         remaining = [e for e in entries if e.path not in rejected_paths]
         removed_count = len(entries) - len(remaining)
@@ -918,20 +973,26 @@ class DatasetProcessor:
     def run(self):
         """执行完整的数据集处理流程。"""
         self._setup_paths_and_logging()
+
+        # [步骤 1/6] 扫描并匹配音频与标注文件
+        self._print_step(1, 6, "扫描并匹配音频与标注文件")
         all_entries = self._find_audio_entries()
+        self._print_info(f"扫描完成，成功匹配到 {len(all_entries)} 个有效音频文件。")
         # ASR 主体模型 (funasr/punc/whisperx_model) 用完；align 留给 split 复用
         _safe_unload("asr", "unload_asr_models")
 
         # Stage: after_scan
         all_entries = self._run_checks_at_stage(all_entries, "after_scan")
 
-        # Normalize
+        # [步骤 2/6] 批量音频标准化
+        self._print_step(2, 6, "批量音频标准化 (格式转换 / 响度规整 / 静音裁剪)")
         all_entries = self._normalize_audio(all_entries)
 
         # Stage: after_normalize
         all_entries = self._run_checks_at_stage(all_entries, "after_normalize")
 
-        # Duration classification
+        # [步骤 3/6] 音频时长分类与情感识别 (SER)
+        self._print_step(3, 6, "音频时长分类与情感识别 (SER)")
         short_threshold = self._cfg.short_threshold
         long_threshold = self._cfg.long_threshold
 
@@ -941,6 +1002,7 @@ class DatasetProcessor:
         short_list = [m for m in all_entries if m.duration <= short_threshold]
         normal_list = [m for m in all_entries if short_threshold < m.duration < long_threshold]
         long_list = [m for m in all_entries if m.duration >= long_threshold]
+        self._print_info(f"时长分类统计: 短音频(≤{short_threshold}s) {len(short_list)} 个, 正常音频 {len(normal_list)} 个, 长音频(≥{long_threshold}s) {len(long_list)} 个")
 
         # SER(1): on short + normal entries
         if self.ser_enabled:
@@ -949,7 +1011,8 @@ class DatasetProcessor:
             # 让 SER 在 split 期不再常驻 — split 期显存峰值只含 align 模型
             _safe_unload("ser", "unload_models")
 
-        # Merge short
+        # [步骤 4/6] 短音频智能合并与分组
+        self._print_step(4, 6, "短音频智能合并与分组")
         processed_short_entries, merge_map_lines = self._process_short_files(short_list)
 
         # Reconstitute combined list: normal + processed_short (long pending split)
@@ -958,6 +1021,8 @@ class DatasetProcessor:
         # Stage: after_merge
         all_entries = self._run_checks_at_stage(all_entries, "after_merge")
 
+        # [步骤 5/6] 长音频智能切分与再分类
+        self._print_step(5, 6, "长音频智能切分与再分类")
         # Split long — align model 在此阶段被 lazy 加载并使用
         unsplit_long_entries, split_entries = self._process_long_files(long_list)
         # align 用完了；下一阶段 SER(2) 重新 lazy 加载 SER backend
@@ -965,14 +1030,17 @@ class DatasetProcessor:
 
         # SER(2): on split segments
         if self.ser_enabled:
-            self._run_ser_on_entries(split_entries)
-            _safe_unload("ser", "unload_models")
+            if split_entries:
+                self._print_info(f"对切分出的 {len(split_entries)} 个片段执行情感识别...")
+                self._run_ser_on_entries(split_entries)
+                _safe_unload("ser", "unload_models")
 
         # Handle split failures
         if unsplit_long_entries:
             on_split_failure = self._split_config.on_split_failure
             if on_split_failure == "isolate":
                 self._isolate_entries(unsplit_long_entries, "切分失败")
+                self._print_warn(f"已隔离 {len(unsplit_long_entries)} 个切分失败的长音频")
                 unsplit_long_entries = []
             else:  # "ignore"
                 if self.ser_enabled:
@@ -985,8 +1053,11 @@ class DatasetProcessor:
         # Stage: final
         all_entries = self._run_checks_at_stage(all_entries, "final")
 
+        # [步骤 6/6] 导出最终列表与整理输出
+        self._print_step(6, 6, "导出最终列表与整理输出")
         self._finalize_output(all_entries, merge_map_lines, len(all_entries))
         self._cleanup_temp_files()
+        self._print_info("数据集预处理流程全部完成！")
 
     def _cleanup_temp_files(self):
         """清理处理过程中生成的临时目录。"""

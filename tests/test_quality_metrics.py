@@ -273,7 +273,7 @@ class TestRunCheckPipeline:
 
         import audio_validator
         reject_result = [{"wav_path": str(wav_path), "snr": 5.0, "snr_reliable": True, "snr_status": "reject"}]
-        monkeypatch.setattr(audio_validator, "batch_check_snr", lambda e, c: reject_result)
+        monkeypatch.setattr(audio_validator, "batch_check_snr", lambda e, c, **_k: reject_result)
         monkeypatch.setattr(audio_validator, "write_snr_report", lambda *a, **k: None)
 
         rejects_at_normalize = run_check_pipeline(entries, cfg, "after_normalize", str(report_dir))

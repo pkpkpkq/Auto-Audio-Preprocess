@@ -9,16 +9,9 @@ import librosa
 import numpy as np
 
 from config_types import AuditCheckConfig, ClippingCheckConfig, SilenceRatioCheckConfig, SnrCheckConfig, CheckPipelineConfig, AudioEntry
+from audio_utils import format_progress
 
 logger = logging.getLogger(__name__)
-
-
-def _format_progress(label: str, current: int, total: int, width: int = 20) -> str:
-    """Format a single-line progress bar string (meant for \\r overwrite)."""
-    pct = current / total if total > 0 else 0
-    filled = int(pct * width)
-    bar = "█" * filled + "░" * (width - filled)
-    return f"\r[{label}] {current}/{total} ({pct:5.1%}) |{bar}|"
 
 
 def _write_report(lines: list[str], output_path: str) -> None:
@@ -291,7 +284,7 @@ def audit_audio_metadata(entries: list[AudioEntry], config: AuditCheckConfig,
             continue
         if not os.path.isfile(wav_path):
             errors.append(f"missing: {wav_path}")
-            logger.warning("审计跳过不存在的文件: %s", wav_path)
+            logger.warning(f"审计跳过不存在的文件: {wav_path}")
             if progress_callback:
                 progress_callback(i, total)
             continue
@@ -324,7 +317,7 @@ def audit_audio_metadata(entries: list[AudioEntry], config: AuditCheckConfig,
                     bd = 16
         except Exception as e:
             errors.append(f"{wav_path}: 读取元数据失败 - {e}")
-            logger.warning("读取 %s 元数据失败: %s", wav_path, e)
+            logger.warning(f"读取 {wav_path} 元数据失败: {e}")
             if progress_callback:
                 progress_callback(i, total)
             continue
@@ -497,12 +490,14 @@ def run_check_pipeline(
     check_config: CheckPipelineConfig,
     stage: str,
     output_dir: str,
+    show_progress: bool = False,
 ) -> list[tuple[str, str, str, str]]:
     """Run all applicable checks for a pipeline stage, write stage-suffixed reports.
 
     Returns list of (wav_path, check_name, reject_action, stage_name) for rejected entries.
     Only checks whose run_at includes `stage` will run.
     Reject records are only collected at the LAST run_at stage for each check.
+    When show_progress is True, prints a single-line progress bar per check to stdout.
     """
     reject_records: list[tuple[str, str, str, str]] = []
 
@@ -518,6 +513,13 @@ def run_check_pipeline(
          write_snr_report, "warn_db", "reject_db"),
     ]
 
+    def _make_cb(label: str):
+        if not show_progress:
+            return None
+        def _cb(current: int, _total: int):
+            print(format_progress(label, current, _total), end="", flush=True)
+        return _cb
+
     for check_name, check_cfg, batch_func, report_name, status_key, write_fn, warn_key, reject_key in check_specs:
         if not check_cfg.enable:
             continue
@@ -526,12 +528,17 @@ def run_check_pipeline(
 
         is_last_run = (stage == check_cfg.run_at[-1])
         report_path = os.path.join(output_dir, f"！{report_name}.{stage}.txt")
+        cb = _make_cb(report_name)
 
         if check_name == "audit":
-            result = batch_func(entries, check_cfg)
+            result = batch_func(entries, check_cfg, progress_callback=cb)
+            if show_progress:
+                print()
             write_audit_report(result, report_path)
         else:
-            results = batch_func(entries, check_cfg)
+            results = batch_func(entries, check_cfg, progress_callback=cb)
+            if show_progress:
+                print()
             kwargs = {}
             if warn_key:
                 kwargs[warn_key] = getattr(check_cfg, warn_key)
@@ -559,25 +566,23 @@ def run_full_audit(
     Thresholds still classify entries as ok/warn/reject in reports for informational purposes.
     When show_progress is True, prints a single-line progress bar per check to stdout.
     """
-    total = len(entries)
-
     def _make_cb(label: str):
         if not show_progress:
             return None
         def _cb(current: int, _total: int):
-            print(_format_progress(label, current, _total), end="", flush=True)
+            print(format_progress(label, current, _total), end="", flush=True)
         return _cb
 
     if check_config.audit.enable:
-        result = audit_audio_metadata(entries, check_config.audit,
-                                      progress_callback=_make_cb("格式审计"))
+        cb = _make_cb("格式审计")
+        result = audit_audio_metadata(entries, check_config.audit, progress_callback=cb)
         if show_progress:
             print()
         write_audit_report(result, os.path.join(output_dir, "！格式审计.txt"))
 
     if check_config.clipping.enable:
-        results = batch_detect_clipping(entries, check_config.clipping,
-                                        progress_callback=_make_cb("削波检测"))
+        cb = _make_cb("削波检测")
+        results = batch_detect_clipping(entries, check_config.clipping, progress_callback=cb)
         if show_progress:
             print()
         write_clipping_report(results, os.path.join(output_dir, "！削波检测.txt"),
@@ -585,8 +590,8 @@ def run_full_audit(
                               reject_threshold=check_config.clipping.reject_threshold)
 
     if check_config.silence_ratio.enable:
-        results = batch_check_silence_ratio(entries, check_config.silence_ratio,
-                                            progress_callback=_make_cb("静默比例"))
+        cb = _make_cb("静默比例")
+        results = batch_check_silence_ratio(entries, check_config.silence_ratio, progress_callback=cb)
         if show_progress:
             print()
         write_silence_ratio_report(results, os.path.join(output_dir, "！静默比例.txt"),
@@ -594,15 +599,15 @@ def run_full_audit(
                                    reject_threshold=check_config.silence_ratio.reject_threshold)
 
     if check_config.snr.enable:
-        results = batch_check_snr(entries, check_config.snr,
-                                  progress_callback=_make_cb("SNR"))
+        cb = _make_cb("SNR")
+        results = batch_check_snr(entries, check_config.snr, progress_callback=cb)
         if show_progress:
             print()
         write_snr_report(results, os.path.join(output_dir, "！SNR.txt"),
                          warn_db=check_config.snr.warn_db,
                          reject_db=check_config.snr.reject_db)
 
-    logger.info("独立审计完成，报告已写入: %s", output_dir)
+    logger.info(f"独立审计完成，报告已写入: {output_dir}")
 
 
 if __name__ == "__main__":
